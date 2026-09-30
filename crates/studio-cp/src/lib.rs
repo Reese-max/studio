@@ -1535,36 +1535,26 @@ async fn provision_acp_auth_secret(
     Ok(format!("aws-sm://{secret_name}#OPENAB_ACP_AUTH_KEY"))
 }
 
-/// Build a fresh `OABServiceManifest` for an agent that has never been
-/// provisioned before — `redeploy()` can only patch an *already-stored*
-/// manifest (studio#111: it has no "create the first one" path). Fields not
-/// derivable from the compose bundle get sensible, zero-prompt defaults:
-/// networking from `oabctl::create::default_networking` (same discovery
-/// `oabctl create`'s CLI wizard uses, minus the interactive prompts),
-/// resources 256/512 (the CLI wizard's own default), `FARGATE`/`X86_64`
-/// (the schema's own `#[serde(default)]` values), no ingress. `acp_enabled`
-/// (studio#119 follow-up, studio#128 made it caller-controlled instead of
-/// hardcoded — agy can't honor it) — when true, `secrets` carries the
-/// generated `OPENAB_ACP_AUTH_KEY` this needs; when false, no ACP secret is
-/// generated at all, nothing to clean up.
-async fn build_default_manifest(
-    aws_config: &aws_config::SdkConfig,
+/// Assemble a fresh `OABServiceManifest` for an agent that has never been
+/// provisioned before — the pure half of [`build_default_manifest`], split
+/// out (and `pub`) so the exact document studio#111's first-provision path
+/// hands to `apply_manifests` is testable without AWS (the async wrapper
+/// below can't be — it discovers real EC2 networking and writes the ACP
+/// secret). Fields not derivable from the compose bundle get sensible,
+/// zero-prompt defaults: resources 256/512 (the `oabctl create` CLI wizard's
+/// own default), `FARGATE`/`X86_64` (the schema's own `#[serde(default)]`
+/// values), no ingress. `secrets`/`networking` arrive already resolved —
+/// the caller owns their provisioning.
+pub fn default_service_manifest(
     namespace: &str,
     name: &str,
     image: &str,
-    bucket: &str,
+    config_from: String,
+    secrets: std::collections::HashMap<String, String>,
+    networking: oabctl::manifest::EcsNetworking,
     acp_enabled: bool,
-    acp_token: Option<&str>,
-) -> anyhow::Result<oabctl::manifest::OABServiceManifest> {
-    let net = oabctl::create::default_networking(aws_config, name).await?;
-    let config_from = default_config_from_uri(bucket, namespace, name);
-    let mut secrets = std::collections::HashMap::new();
-    if acp_enabled {
-        let acp_auth_ref =
-            provision_acp_auth_secret(aws_config, namespace, name, acp_token).await?;
-        secrets.insert("OPENAB_ACP_AUTH_KEY".to_string(), acp_auth_ref);
-    }
-    Ok(oabctl::manifest::OABServiceManifest {
+) -> oabctl::manifest::OABServiceManifest {
+    oabctl::manifest::OABServiceManifest {
         api_version: "oab.dev/v2".to_string(),
         kind: "OABService".to_string(),
         metadata: oabctl::manifest::Metadata {
@@ -1586,16 +1576,57 @@ async fn build_default_manifest(
                 capacity_provider: "FARGATE".to_string(),
                 architecture: "X86_64".to_string(),
                 task_role_arn: None,
-                networking: oabctl::manifest::EcsNetworking {
-                    subnets: net.subnets,
-                    security_groups: net.security_groups,
-                    assign_public_ip: false,
-                },
+                networking,
             }),
             ingress: None,
             acp_enabled: Some(acp_enabled),
         },
-    })
+    }
+}
+
+/// Build a fresh `OABServiceManifest` for an agent that has never been
+/// provisioned before — `redeploy()` can only patch an *already-stored*
+/// manifest (studio#111: it has no "create the first one" path). Fields not
+/// derivable from the compose bundle get sensible, zero-prompt defaults:
+/// networking from `oabctl::create::default_networking` (same discovery
+/// `oabctl create`'s CLI wizard uses, minus the interactive prompts; private
+/// subnets, no public IP), resources 256/512 (the CLI wizard's own default),
+/// `FARGATE`/`X86_64` (the schema's own `#[serde(default)]` values), no
+/// ingress. `acp_enabled`
+/// (studio#119 follow-up, studio#128 made it caller-controlled instead of
+/// hardcoded — agy can't honor it) — when true, `secrets` carries the
+/// generated `OPENAB_ACP_AUTH_KEY` this needs; when false, no ACP secret is
+/// generated at all, nothing to clean up.
+async fn build_default_manifest(
+    aws_config: &aws_config::SdkConfig,
+    namespace: &str,
+    name: &str,
+    image: &str,
+    bucket: &str,
+    acp_enabled: bool,
+    acp_token: Option<&str>,
+) -> anyhow::Result<oabctl::manifest::OABServiceManifest> {
+    let net = oabctl::create::default_networking(aws_config, name).await?;
+    let config_from = default_config_from_uri(bucket, namespace, name);
+    let mut secrets = std::collections::HashMap::new();
+    if acp_enabled {
+        let acp_auth_ref =
+            provision_acp_auth_secret(aws_config, namespace, name, acp_token).await?;
+        secrets.insert("OPENAB_ACP_AUTH_KEY".to_string(), acp_auth_ref);
+    }
+    Ok(default_service_manifest(
+        namespace,
+        name,
+        image,
+        config_from,
+        secrets,
+        oabctl::manifest::EcsNetworking {
+            subnets: net.subnets,
+            security_groups: net.security_groups,
+            assign_public_ip: false,
+        },
+        acp_enabled,
+    ))
 }
 
 /// Provision an agent from the compose **library**: compose `template ⊕ overlay`,
