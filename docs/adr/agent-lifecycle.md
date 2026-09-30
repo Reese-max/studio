@@ -211,12 +211,14 @@ an ECS-only coincidence.
   change: the §6 projection rows, the cause enums, new attributes, and
   deadline/window tuning.
 - **Follow-ups:** the `RuntimeDriver` contract ADR —
-  [ADR-2](./deployment-control-plane.md) (verbs apply / observe / scale /
-  cordon / …) — also owns the surface *labels* of the `AgentState` enum. `Paused`
-  is the state name while `cordon`/`resume` are the write-path verbs; whether
-  the shipped enum label stays `Paused` or aligns with the verbs is an open
-  naming consideration deferred to that ADR — the discriminator semantics
-  above are settled either way. Also: an identity / lease / epoch spec ADR.
+  [ADR-2](./deployment-control-plane.md) (verbs apply / scale / cordon /
+  resume / stop / delete) — also owns the surface *labels* of the
+  `AgentState` enum: `Paused` is the state name while `cordon`/`resume` are
+  the write-path verbs. The naming alignment (state `Paused` vs verb
+  `cordon`) is recorded in ADR-2 §5 — the enum stays `Paused`, since cordon
+  is only one of several `¬accepting_work` causes; the discriminator
+  semantics above are settled either way. Also: an identity / lease / epoch
+  spec ADR.
 
 ## 10. More Information
 
