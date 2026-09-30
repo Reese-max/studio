@@ -689,9 +689,17 @@ fn parse_aws_config(text: &str) -> Vec<AwsProfile> {
             if let Some(p) = current.take() {
                 profiles.push(p);
             }
-            let name = header.strip_prefix("profile ").unwrap_or(header).trim();
-            current = Some(AwsProfile {
-                name: name.to_string(),
+            // Only `[default]` and `[profile <name>]` sections are credential
+            // profiles — `[sso-session …]`/`[services …]`/`[preview]`/
+            // `[plugins …]` configure other things and must not be offered as
+            // profiles by `list_aws_profiles` (studio#104).
+            let name = if header == "default" {
+                Some("default")
+            } else {
+                header.strip_prefix("profile ")
+            };
+            current = name.map(|n| AwsProfile {
+                name: n.trim().to_string(),
                 region: None,
             });
             continue;
