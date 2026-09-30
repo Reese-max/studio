@@ -1920,7 +1920,31 @@ usercron_path = "cronjob.toml"
 /// in an S3 zip URI that's meaningless for a local reference copy, so the
 /// local file is the clean, human-authored text the operator actually
 /// configured, not an ECS/k8s-specific artifact.
-fn write_local_agent_config(folder: &str, name: &str, config_toml: &[u8]) -> anyhow::Result<()> {
+///
+/// `name` becomes a directory directly under `folder`, so it must be a
+/// single path component — never a path. `deploy_provision_agent` is a
+/// public MCP tool any caller (not just the console wizard) can drive, and
+/// the wizard's Agent-name field is free text either way, so `..` /
+/// separators / an absolute path would escape the operator's Config folder
+/// and write `config.toml` wherever the sidecar can reach. `\` is refused
+/// explicitly: `Path::components` only treats it as a separator on Windows,
+/// so without the extra check a name that's contained on Unix would be a
+/// traversal on Windows.
+pub fn write_local_agent_config(
+    folder: &str,
+    name: &str,
+    config_toml: &[u8],
+) -> anyhow::Result<()> {
+    let mut components = std::path::Path::new(name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+        || name.contains('\\')
+    {
+        anyhow::bail!(
+            "refusing to write the local config copy: agent name {name:?} isn't a single path \
+             component, so `<config folder>/{name}` would not stay inside the folder"
+        );
+    }
     let dir = std::path::Path::new(folder).join(name);
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", dir.display()))?;
