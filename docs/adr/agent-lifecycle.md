@@ -4,7 +4,7 @@
 - **Date:** 2026-08-08
 - **Author:** @brettchien
 - **Reviewers:** Mira (ECS), Jellyfish (control-plane), Falcon (MCP) — all LGTM
-- **Tracking issues:** implementation openabdev/studio#2
+- **Tracking issues:** implementation openabdev/studio#2 · review follow-ups openabdev/studio#3
 
 > **Y-statement.** In the context of running agents across heterogeneous
 > runtimes, facing the need for one glanceable, runtime-independent notion of
@@ -92,8 +92,9 @@ never dispatched new work while the attribute holds — the *agent* is not pause
 only that instance is; a replacement is a fresh instance with its own lifecycle
 (typically `Starting`→`Running`). *When and in what order* a superseded instance
 is drained or replaced is a **fleet-level rollout** concern (e.g.
-make-before-break) — out of scope for this instance-level ADR; see the future
-rollout / RuntimeDriver ADR. Also: health `cause` = observed-bad vs
+make-before-break) — out of scope for this instance-level ADR; the
+RuntimeDriver contract is [ADR-2](./deployment-control-plane.md) and rollout
+ordering remains future work. Also: health `cause` = observed-bad vs
 unobservable; death `cause` enum; turn-level busy/idle.
 
 ## 4. Principles
