@@ -13,7 +13,8 @@ fn workspace_is_rustfmt_clean() {
         .expect("spawn cargo fmt");
     assert!(
         output.status.success(),
-        "cargo fmt --all -- --check failed:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "cargo fmt --all -- --check failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
