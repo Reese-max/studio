@@ -12,6 +12,11 @@
 //! an MCP surface later) is a downstream client of this crate, so oabctl stays
 //! clean and upstream-contributable.
 
+// Provision/observe entry points intentionally take flat argument lists (the
+// callers are thin dispatchers passing args through); the 7-arg clippy
+// heuristic doesn't fit this API surface.
+#![allow(clippy::too_many_arguments)]
+
 pub use agent_lifecycle::AgentState;
 pub use oabctl::{EcsEvent, ServiceStatus, DEFAULT_EVENTS_LOG_GROUP};
 
@@ -936,17 +941,12 @@ pub async fn list_service_accounts(
 // the existing schema, not a parallel one). `fleets-k8s.toml` is migrated into
 // `fleets.toml` once at startup — see `migrate_legacy_k8s_bindings`.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FleetRuntime {
+    #[default]
     Ecs,
     K8s,
-}
-
-impl Default for FleetRuntime {
-    fn default() -> Self {
-        FleetRuntime::Ecs
-    }
 }
 
 /// A declarative binding of a managed fleet to the credential/context that
@@ -1180,10 +1180,8 @@ fn role_identity(arn: &str) -> Option<(String, String)> {
     let resource = parts[5..].join(":");
     let name = if let Some(r) = resource.strip_prefix("assumed-role/") {
         r.split('/').next()?.to_string()
-    } else if let Some(r) = resource.strip_prefix("role/") {
-        r.to_string()
     } else {
-        return None;
+        resource.strip_prefix("role/")?.to_string()
     };
     Some((account, name))
 }
