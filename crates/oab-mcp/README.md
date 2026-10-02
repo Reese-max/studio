@@ -19,10 +19,12 @@ control plane as a first-class client — "agents do control, humans direct."
 
 Reads project each ECS instance onto the canonical 6-state `AgentState`
 (ADR-1). `deploy_scale` is 0 (off) / 1 (on) only — an OAB service runs a single
-bot token, so >1 would duplicate responders. Both `deploy_provision*` create an
-agent that has no stored manifest yet by building a fresh one and applying it
-(studio#111); the table above is the argument list, and each tool's description
-in `tools()` carries the per-argument contract.
+bot token, so >1 would duplicate responders. Both `deploy_provision*` are create-or-update
+(studio#111): an agent with **no** stored manifest gets a fresh one built and
+applied; one that already has a stored manifest takes `redeploy`'s patch path,
+reusing that manifest's networking/resources/secrets and changing only the image
+and bundle. The table above is the argument list, and each tool's description in
+`tools()` carries the per-argument contract.
 
 ## Run
 

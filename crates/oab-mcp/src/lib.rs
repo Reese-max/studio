@@ -407,8 +407,9 @@ fn identity_binding(
 
 /// The caller's own `region`/`profile` override, read out of a call's args, as
 /// `(region, profile)` in that order. Extracted beside [`base_binding`] so the
-/// reading itself is covered: a handler that stopped forwarding these, or
-/// swapped the two, would otherwise no-op with every test in the repo green.
+/// two halves cannot be swapped — the covered failure being a handler pairing
+/// the region with the profile's field, which would resolve a config no caller
+/// asked for and would otherwise no-op with every test in the repo green.
 fn identity_args(args: &Map<String, Value>) -> (Option<&str>, Option<&str>) {
     (
         args.get("region").and_then(Value::as_str),
@@ -441,23 +442,13 @@ fn binding_and_key(
 ) -> (Option<scp::FleetBinding>, String) {
     let fleet = args.get("fleet").and_then(Value::as_str);
     let key = memo_key(fleet, cluster);
-    match fleet {
-        Some(_) => {
-            let binding = base_binding(bindings, fleet, cluster)
-                .filter(|b| b.profile.is_some() || b.region.is_some());
-            (binding, key)
-        }
-        // `bindings` arrives as a plain borrow — the caller's `read()` guard
-        // died at the end of its own statement, so nothing here can hold a lock
-        // across an await (there isn't one).
-        None => {
-            let binding = bindings
-                .for_cluster(cluster)
-                .filter(|b| b.profile.is_some() || b.region.is_some())
-                .cloned();
-            (binding, key)
-        }
-    }
+    // `bindings` is a plain borrow — the caller's `read()` guard died at the end
+    // of its own statement, so nothing here can hold a lock across an await
+    // (there isn't one). With no fleet named, `base_binding` reduces to the
+    // `for_cluster` fallback, so both cases are one expression.
+    let binding = base_binding(bindings, fleet, cluster)
+        .filter(|b| b.profile.is_some() || b.region.is_some());
+    (binding, key)
 }
 
 /// The memo key for a resolved credential: namespaced by identity source, so a
