@@ -743,10 +743,11 @@ if (fleetDetailEl) {
         namespace: fleet?.namespace ?? null,
         expectedPrincipal: fleet?.expected_principal ?? null,
         // studio#111: the fleet's recorded region/profile go along with the
-        // deploy for the same reason its k8s placement does — a
-        // console-written `[fleet.<name>]` block has no `cluster` key, so the
-        // sidecar can't resolve the fleet's own credential from it and would
-        // otherwise act as the ambient `[default]` account/region.
+        // deploy for the same reason its k8s placement does — the sidecar
+        // resolves a fleet's credential per ECS cluster, and a `[fleet.<name>]`
+        // block that doesn't declare `cluster` (which this console's writer
+        // never emits) leaves the recorded pair unread, so it would otherwise
+        // act as the ambient `[default]` account/region.
         region: fleet?.region ?? null,
         profile: fleet?.profile ?? null,
       });

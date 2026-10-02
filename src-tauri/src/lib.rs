@@ -136,6 +136,8 @@ async fn deploy_provision(
     provider: Option<String>,
     context: Option<String>,
     expected_principal: Option<String>,
+    region: Option<String>,
+    profile: Option<String>,
 ) -> Result<Value, String> {
     let cluster = cluster.unwrap_or_else(default_cluster);
     let client = {
@@ -168,6 +170,15 @@ async fn deploy_provision(
     }
     if let Some(ep) = expected_principal.filter(|s| !s.is_empty()) {
         params["expected_principal"] = json!(ep);
+    }
+    // studio#111: same AWS identity as `deploy_provision_agent` below — the
+    // compose-library path creates through the identical
+    // create-or-redeploy branch, so it needs the identical override.
+    if let Some(r) = region.filter(|s| !s.is_empty()) {
+        params["region"] = json!(r);
+    }
+    if let Some(p) = profile.filter(|s| !s.is_empty()) {
+        params["profile"] = json!(p);
     }
     match client.call_tool("deploy_provision", params).await {
         Ok(v) => Ok(v),
@@ -250,12 +261,13 @@ async fn deploy_provision_agent(
     }
     // studio#111: forward the fleet's AWS identity. The console collects
     // Region + Credential profile in the New Fleet identity step and records
-    // them in `fleets.toml` — but a console-written `[fleet.<name>]` block
-    // carries no `cluster` key, so the sidecar's per-cluster credential lookup
-    // can't resolve them and would provision against the ambient `[default]`
-    // chain instead. On a first create there's no block at all yet
-    // (`fleets.toml` is written only after a confirmed successful deploy), so
-    // these args are the only carrier the create has.
+    // them in `fleets.toml` — but `oab-mcp` resolves the managing credential
+    // per ECS cluster, keyed on a binding's `cluster` key, which a
+    // `[fleet.<name>]` block need not carry (the console never writes one), so
+    // the recorded pair is read by nothing and the deploy would act as the
+    // ambient `[default]` chain instead. On a first create there's no block at
+    // all yet (`fleets.toml` is written only after a confirmed successful
+    // deploy), so these args are the only carrier the create has.
     if let Some(r) = region.filter(|s| !s.is_empty()) {
         params["region"] = json!(r);
     }

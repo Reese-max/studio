@@ -20,7 +20,7 @@
 // call.
 
 import { describe, it, expect } from "vitest";
-import { provisionAgentArgs } from "./deployArgs";
+import { provisionAgentArgs, awsIdentityFor } from "./deployArgs";
 
 const ecs = {
   image: "ghcr.io/openabdev/openab:0.10.0-beta.3-codex",
@@ -101,6 +101,43 @@ describe("provisionAgentArgs — k8s dispatch (studio#104/#153)", () => {
   });
 });
 
+describe("awsIdentityFor — which source answers a submit (studio#111)", () => {
+  it("reads new-fleet's own identity step fields", () => {
+    expect(
+      awsIdentityFor({ kind: "new-fleet", region: "ap-northeast-1", profile: "studio-prod" }),
+    ).toEqual({ region: "ap-northeast-1", profile: "studio-prod" });
+  });
+
+  it("inherits add-instance's fleet-recorded pair, not an empty form", () => {
+    // The panel has no AWS field group in add-instance mode, so reading the
+    // form there would ship "no override" for a fleet that has one recorded.
+    expect(
+      awsIdentityFor({ kind: "add-instance", region: "eu-west-1", profile: "prod-admin" }),
+    ).toEqual({ region: "eu-west-1", profile: "prod-admin" });
+  });
+
+  it("treats an unrecorded fleet pair as no override at all", () => {
+    // Both undefined, not empty strings: the sidecar must keep resolving the
+    // credential itself rather than being handed a blank region/profile.
+    expect(awsIdentityFor({ kind: "add-instance", region: null, profile: null })).toEqual({
+      region: undefined,
+      profile: undefined,
+    });
+  });
+
+  it("trims surrounding whitespace but keeps a real value", () => {
+    expect(
+      awsIdentityFor({ kind: "new-fleet", region: "  ap-northeast-1  ", profile: " studio-prod " }),
+    ).toEqual({ region: "ap-northeast-1", profile: "studio-prod" });
+  });
+
+  it("drops a whitespace-only field", () => {
+    expect(
+      awsIdentityFor({ kind: "new-fleet", region: "   ", profile: "  studio-prod " }),
+    ).toEqual({ region: undefined, profile: "studio-prod" });
+  });
+});
+
 describe("provisionAgentArgs — optional wizard fields", () => {
   it("forwards chat platform secrets and the local config folder when set", () => {
     const args = provisionAgentArgs({
@@ -140,6 +177,32 @@ describe("provisionAgentArgs — optional wizard fields", () => {
     ]) {
       expect(key in args).toBe(false);
     }
+  });
+
+  it("trims surrounding whitespace on every optional field", () => {
+    // Pre-existing behavior for most of these; pinned because a trimmed
+    // `local_config_folder` in particular is new (it used to go over untrimmed,
+    // and a trailing space in a path is a different directory).
+    const args = provisionAgentArgs({
+      ...ecs,
+      acpEnabled: true,
+      apiKey: "  sk-vendor  ",
+      chatPlatform: " discord ",
+      chatBotToken: "  bot-token ",
+      chatChannelSecret: "  channel-secret ",
+      acpToken: "  acp-key ",
+      localConfigFolder: "  /home/op/studio-config  ",
+      region: "  ap-northeast-1  ",
+      profile: "  studio-prod  ",
+    });
+    expect(args.api_key).toBe("sk-vendor");
+    expect(args.chat_platform).toBe("discord");
+    expect(args.chat_bot_token).toBe("bot-token");
+    expect(args.chat_channel_secret).toBe("channel-secret");
+    expect(args.acp_token).toBe("acp-key");
+    expect(args.local_config_folder).toBe("/home/op/studio-config");
+    expect(args.region).toBe("ap-northeast-1");
+    expect(args.profile).toBe("studio-prod");
   });
 
   it("carries acp_enabled verbatim — the sidecar owns the default-when-absent rule", () => {

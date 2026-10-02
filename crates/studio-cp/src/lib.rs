@@ -989,6 +989,30 @@ impl FleetBinding {
                 .iter()
                 .any(|m| m == service_name || m == short_name)
     }
+
+    /// A copy of this binding with a caller's own `region`/`profile` layered
+    /// on top (studio#111): each field the caller names replaces this
+    /// binding's, each one it leaves unset is kept, and an `None` binding
+    /// (`for_cluster` found no fleet for the cluster) yields a
+    /// credentials-only binding.
+    ///
+    /// **Layering, not substitution** is the point. A deploy call that pins
+    /// only a region must keep acting under whatever profile the governing
+    /// binding selects — building a fresh binding from the caller's fields
+    /// alone would quietly drop it and fall back to the ambient `[default]`
+    /// account, which is the very failure this exists to prevent.
+    ///
+    /// Blank strings count as unset, so a caller that always passes its fields
+    /// (an empty text input, a `null` field) needs no trimming of its own.
+    pub fn with_identity(mut self, region: Option<&str>, profile: Option<&str>) -> FleetBinding {
+        if let Some(r) = region.filter(|s| !s.is_empty()) {
+            self.region = Some(r.to_string());
+        }
+        if let Some(p) = profile.filter(|s| !s.is_empty()) {
+            self.profile = Some(p.to_string());
+        }
+        self
+    }
 }
 
 /// The body of a `[fleet.<name>]` table — the fields of a [`FleetBinding`] minus
@@ -3170,5 +3194,80 @@ aws_access_key_id = AKIA...
     fn acp_compat_check_lets_a_custom_image_through_unverified() {
         check_acp_image_compat("my-registry.example.com/custom:latest", &wizard_input(true, None))
             .expect("not an openab release tag — can't verify, don't block");
+    }
+
+    // studio#111 — `FleetBinding::with_identity`, the seam `oab-mcp`'s
+    // `aws_or` layers a deploy call's own region/profile onto. Pure, so no AWS
+    // access is needed to pin the layering rule.
+
+    fn binding(region: Option<&str>, profile: Option<&str>) -> FleetBinding {
+        FleetBinding {
+            name: "prod".into(),
+            runtime: FleetRuntime::Ecs,
+            region: region.map(str::to_string),
+            profile: profile.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn with_identity_overrides_both_fields_when_the_caller_names_both() {
+        let b = binding(Some("us-east-1"), Some("old"))
+            .with_identity(Some("ap-northeast-1"), Some("new"));
+        assert_eq!(b.region.as_deref(), Some("ap-northeast-1"));
+        assert_eq!(b.profile.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn with_identity_keeps_the_bindings_profile_when_the_caller_pins_only_a_region() {
+        // The regression this shape exists for: substituting the caller's
+        // fields for the binding's would drop "prod-admin" here and silently
+        // provision under the ambient `[default]` account instead.
+        let b =
+            binding(Some("us-east-1"), Some("prod-admin")).with_identity(Some("eu-west-1"), None);
+        assert_eq!(b.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(b.profile.as_deref(), Some("prod-admin"));
+    }
+
+    #[test]
+    fn with_identity_keeps_the_bindings_region_when_the_caller_pins_only_a_profile() {
+        let b = binding(Some("us-east-1"), None).with_identity(None, Some("staging"));
+        assert_eq!(b.region.as_deref(), Some("us-east-1"));
+        assert_eq!(b.profile.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn with_identity_treats_blank_fields_as_unset() {
+        // The console always passes both fields, so an empty text input has
+        // to read as "unset" rather than as "provision into the empty region".
+        let b = binding(Some("us-east-1"), Some("prod-admin")).with_identity(Some(""), Some("  "));
+        assert_eq!(b.region.as_deref(), Some("us-east-1"));
+        assert_eq!(b.profile.as_deref(), Some("prod-admin"));
+    }
+
+    #[test]
+    fn with_identity_on_a_blank_binding_yields_a_credentials_only_binding() {
+        // What `oab-mcp`'s `aws_or` does when `for_cluster` found nothing (the
+        // common case for a console-created fleet): start from a blank binding,
+        // so the caller's own answer is all there is and must not be discarded.
+        let b = FleetBinding::default().with_identity(Some("ap-northeast-1"), Some("studio-prod"));
+        assert_eq!(b.region.as_deref(), Some("ap-northeast-1"));
+        assert_eq!(b.profile.as_deref(), Some("studio-prod"));
+        // …and nothing else is invented.
+        assert_eq!(b.cluster, None);
+        assert_eq!(b.context, None);
+        assert_eq!(b.namespace, None);
+        assert!(b.members.is_empty());
+    }
+
+    #[test]
+    fn with_identity_leaves_the_rest_of_the_binding_untouched() {
+        let mut base = binding(Some("us-east-1"), Some("prod-admin"));
+        base.members = vec!["oab-default-zeus".into()];
+        base.cluster = Some("oab".into());
+        let b = base.with_identity(Some("eu-west-1"), Some("studio-prod"));
+        assert_eq!(b.name, "prod");
+        assert_eq!(b.cluster.as_deref(), Some("oab"));
+        assert_eq!(b.members, vec!["oab-default-zeus".to_string()]);
     }
 }

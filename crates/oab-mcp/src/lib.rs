@@ -176,7 +176,7 @@ pub fn tools() -> Vec<Tool> {
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
                     "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
-                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a console-created fleet's `[fleet.<name>]` block has no `cluster` key, so the per-cluster lookup never matches it; on a first create there is no block at all yet." },
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a fleet binding whose block doesn't declare the `cluster` key that per-cluster lookup matches on (the console's writer never emits one); on a first create there is no block at all yet." },
                     "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the cluster's fleet binding — same gap as `region` (studio#111)." }
                 },
                 "required": ["library", "template", "name"]
@@ -203,7 +203,7 @@ pub fn tools() -> Vec<Tool> {
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
                     "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
-                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a console-created fleet's `[fleet.<name>]` block has no `cluster` key, so the per-cluster lookup never matches it; on a first create there is no block at all yet." },
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a fleet binding whose block doesn't declare the `cluster` key that per-cluster lookup matches on (the console's writer never emits one); on a first create there is no block at all yet." },
                     "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the cluster's fleet binding — same gap as `region` (studio#111)." }
                 },
                 "required": ["image", "name"]
@@ -540,19 +540,24 @@ impl OabMcp {
     /// precedence (studio#111).
     ///
     /// `aws_for`'s per-cluster lookup keys on a binding's `cluster` field,
-    /// which a console-written `[fleet.<name>]` block doesn't have —
-    /// `appendFleetBlock` writes `runtime`/`region`/`profile`/`members`, not
-    /// `cluster` — so for every console-created fleet it falls through to the
-    /// ambient `[default]` chain. A deploy is exactly where that hurts most: on
-    /// a *first* create there is no block at all yet (`fleets.toml` is written
-    /// only after a confirmed successful provision), and the manifest built by
-    /// #111's create-from-scratch path resolves its VPC/subnet/security-group
+    /// which a `[fleet.<name>]` block need not declare — the console never
+    /// writes one (`appendFleetBlock` emits runtime/region/profile/members, not
+    /// `cluster`), and neither does the shape the ADR's canonical example
+    /// shows — so for those fleets it falls through to the ambient `[default]`
+    /// chain and the fleet's recorded `region`/`profile` are read by nothing. A
+    /// deploy is exactly where that hurts most: on a *first* create there is no
+    /// block at all yet (`fleets.toml` is written only after a confirmed
+    /// successful provision), and the manifest built by #111's
+    /// create-from-scratch path resolves its VPC/subnet/security-group
     /// defaults against whatever config it is handed, so a create meant for
     /// one account/region would land in another. Passing the wizard's answer
     /// with the call closes that.
     ///
-    /// Falls back to [`Self::aws_for`] when the caller names neither, so every
-    /// existing caller keeps today's behavior.
+    /// The overrides are layered onto the cluster's own binding, not
+    /// substituted for it — a caller that pins only `region` still acts under
+    /// whichever profile that binding selects. Falls back to [`Self::aws_for`]
+    /// when the caller names neither, so every existing caller keeps today's
+    /// behavior.
     async fn aws_or(
         &self,
         cluster: &str,
@@ -566,12 +571,19 @@ impl OabMcp {
         if region.is_none() && profile.is_none() {
             return self.aws_for(cluster).await;
         }
-        scp::resolve_binding_config(&scp::FleetBinding {
-            region: region.map(str::to_string),
-            profile: profile.map(str::to_string),
-            ..Default::default()
-        })
-        .await
+        // Short read-lock, clone out, drop the guard before any await. No
+        // binding governs the cluster (the common case for a console-created
+        // fleet — see the doc comment) ⇒ start from a blank one and let the
+        // caller's own answer stand as the only identity there is.
+        let mut binding = self
+            .bindings
+            .read()
+            .unwrap()
+            .for_cluster(cluster)
+            .cloned()
+            .unwrap_or_default();
+        binding = binding.with_identity(region, profile);
+        scp::resolve_binding_config(&binding).await
     }
 
     async fn t_list(&self, args: &Map<String, Value>) -> Result<Value> {

@@ -14,7 +14,7 @@
 
 import type { Source } from "./source";
 import { appendMember, appendFleetBlock, fleetBlockExists } from "./fleetToml";
-import { provisionAgentArgs } from "./deployArgs";
+import { provisionAgentArgs, awsIdentityFor } from "./deployArgs";
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -102,10 +102,11 @@ function randomGreekName(): string {
 // account were fixed the moment the fleet was created.
 //
 // studio#111: the `region`/`profile` pair rides along for the same reason.
-// A console-written `[fleet.<name>]` block has no `cluster` key, so the
-// sidecar's per-cluster credential lookup never matches it and falls back to
-// the ambient `[default]` chain — the answer has to travel with the call
-// instead (see `deployArgs.ts`).
+// The sidecar resolves a fleet's managing credential per ECS cluster, keyed
+// on a binding's `cluster` key, which a `[fleet.<name>]` block need not carry
+// (this console's writer never emits one) — so the recorded pair is read by
+// nothing and the ambient `[default]` chain answers instead. The answer has
+// to travel with the call (see `deployArgs.ts`).
 export type DeployMode =
   | { kind: "new-fleet" }
   | {
@@ -676,8 +677,11 @@ export function initDeployPanel(deps: DeployPanelDeps): DeployPanelHandle | null
     // the call — see `deployArgs.ts`. "new-fleet" reads it off the identity
     // step's own fields; "add-instance" inherits the existing fleet's
     // recorded region/profile, the same place it inherits its k8s placement.
-    const awsRegion = mode.kind === "new-fleet" ? regionInput.value : mode.region ?? "";
-    const awsProfile = mode.kind === "new-fleet" ? profileInput.value : mode.profile ?? "";
+    const { region: awsRegion, profile: awsProfile } = awsIdentityFor(
+      mode.kind === "new-fleet"
+        ? { kind: "new-fleet", region: regionInput.value, profile: profileInput.value }
+        : { kind: "add-instance", region: mode.region, profile: mode.profile },
+    );
     let res: { image?: string; digest?: string; objects?: number };
     try {
       res = await invoke(
@@ -721,8 +725,8 @@ export function initDeployPanel(deps: DeployPanelDeps): DeployPanelHandle | null
                     // Same values the deploy just ran under, not a second read
                     // of the form — the recorded binding and the call that
                     // created the agent have to agree.
-                    region: awsRegion.trim() || null,
-                    profile: awsProfile.trim() || null,
+                    region: awsRegion ?? null,
+                    profile: awsProfile ?? null,
                   },
             })
           : appendMember(current.text, fleetName, service);

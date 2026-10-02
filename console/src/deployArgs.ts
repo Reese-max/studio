@@ -9,13 +9,14 @@
 // written strictly *after* a confirmed successful provision (ADR-83 §7.5), so
 // at create time the region/profile the identity step collected exist nowhere
 // but here. Drop them and `oab-mcp` falls back to the ambient `[default]`
-// credential chain, because a console-written `[fleet.<name>]` block carries no
-// `cluster` key and `FleetBindings::for_cluster` therefore never matches it —
-// so the first manifest's `default_networking` VPC/subnet/security-group
-// discovery (studio#111's create-from-scratch defaults, ported from
-// `oabctl create`'s wizard) and the apply itself would both run against
-// whichever account the ambient chain happens to resolve, while `fleets.toml`
-// goes on to record the region the operator actually picked.
+// credential chain, because it resolves a fleet's credential per ECS cluster
+// and a `[fleet.<name]>` block need not declare the `cluster` key that lookup
+// matches on (this console's writer never emits one) — so the first manifest's
+// `default_networking` VPC/subnet/security-group discovery (studio#111's
+// create-from-scratch defaults, ported from `oabctl create`'s wizard) and the
+// apply itself would both run against whichever account the ambient chain
+// happens to resolve, while `fleets.toml` goes on to record the region the
+// operator actually picked.
 //
 // Pure and side-effect-free, like `fleetToml.ts` — the DOM reads stay in
 // `deploy.ts`, this only shapes what they collected.
@@ -46,6 +47,35 @@ export interface ProvisionAgentInput {
   profile?: string;
   /** Present ⇔ this submit targets k8s (studio#104/#153). */
   k8s?: K8sPlacement;
+}
+
+/**
+ * Where one submit's AWS identity comes from — the same split the panel's
+ * `DeployMode` makes for k8s placement (studio#153), for the same reason:
+ * `new-fleet` collects the answers in its own identity step, `add-instance`
+ * inherits them from the fleet it is adding to.
+ */
+export type AwsIdentitySource =
+  | { kind: "new-fleet"; region: string; profile: string }
+  | { kind: "add-instance"; region: string | null; profile: string | null };
+
+/**
+ * The AWS identity a submit should deploy under — trimmed, never invented.
+ *
+ * `add-instance` reads the *fleet's* recorded pair, not an empty form (the
+ * panel has no AWS field group in that mode), and a fleet with nothing
+ * recorded yields `undefined` for both, i.e. "no override", so the sidecar
+ * keeps resolving the credential itself rather than being handed blanks.
+ */
+export function awsIdentityFor(source: AwsIdentitySource): {
+  region?: string;
+  profile?: string;
+} {
+  const [region, profile] =
+    source.kind === "new-fleet"
+      ? [source.region, source.profile]
+      : [source.region ?? "", source.profile ?? ""];
+  return { region: orUndefined(region), profile: orUndefined(profile) };
 }
 
 /**
