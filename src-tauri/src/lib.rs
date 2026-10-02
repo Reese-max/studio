@@ -173,7 +173,11 @@ async fn deploy_provision(
     }
     // studio#111: same AWS identity as `deploy_provision_agent` below — the
     // compose-library path creates through the identical
-    // create-or-redeploy branch, so it needs the identical override.
+    // create-or-redeploy branch, so it needs the identical override. No
+    // console caller sends these yet (the wizard only calls
+    // `deploy_provision_agent`, and its compose-library UI was removed in
+    // studio#128); they exist for direct MCP clients, like the tool's other
+    // provider/placement args.
     if let Some(r) = region.filter(|s| !s.is_empty()) {
         params["region"] = json!(r);
     }

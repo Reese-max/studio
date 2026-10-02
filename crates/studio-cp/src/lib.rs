@@ -1004,12 +1004,15 @@ impl FleetBinding {
     ///
     /// Blank strings count as unset, so a caller that always passes its fields
     /// (an empty text input, a `null` field) needs no trimming of its own.
+    /// Surrounding whitespace is trimmed off an accepted value, matching the
+    /// console layer (`deployArgs.ts`'s `orUndefined`), so a stray space can't
+    /// reach `aws_config::Region::new` and resolve a region that doesn't exist.
     pub fn with_identity(mut self, region: Option<&str>, profile: Option<&str>) -> FleetBinding {
-        if let Some(r) = region.filter(|s| !s.is_empty()) {
-            self.region = Some(r.to_string());
+        if let Some(r) = region.filter(|s| !s.trim().is_empty()) {
+            self.region = Some(r.trim().to_string());
         }
-        if let Some(p) = profile.filter(|s| !s.is_empty()) {
-            self.profile = Some(p.to_string());
+        if let Some(p) = profile.filter(|s| !s.trim().is_empty()) {
+            self.profile = Some(p.trim().to_string());
         }
         self
     }
@@ -3243,6 +3246,16 @@ aws_access_key_id = AKIA...
         let b = binding(Some("us-east-1"), Some("prod-admin")).with_identity(Some(""), Some("  "));
         assert_eq!(b.region.as_deref(), Some("us-east-1"));
         assert_eq!(b.profile.as_deref(), Some("prod-admin"));
+    }
+
+    #[test]
+    fn with_identity_trims_an_accepted_value() {
+        // Same rule as the console layer's, so a padded field from any caller
+        // can't reach `Region::new` and name a region that doesn't exist.
+        let b = binding(Some("us-east-1"), Some("prod-admin"))
+            .with_identity(Some("  ap-northeast-1  "), Some(" studio-prod\t"));
+        assert_eq!(b.region.as_deref(), Some("ap-northeast-1"));
+        assert_eq!(b.profile.as_deref(), Some("studio-prod"));
     }
 
     #[test]

@@ -355,6 +355,29 @@ impl Target {
     }
 }
 
+/// The binding a call should resolve its AWS identity from (studio#111):
+/// whatever fleet governs `cluster`, with the caller's own `region`/`profile`
+/// layered on top.
+///
+/// Split out of [`OabMcp::aws_or`] — and kept free of `.await` — so the
+/// layering, the cluster lookup and the argument order are all unit-testable
+/// without an AWS client. Returns a blank binding when no fleet governs the
+/// cluster (the common case for a console-created fleet, whose
+/// `[fleet.<name>]` block declares no `cluster` key), in which case the
+/// caller's own answer is the only identity there is.
+fn identity_binding(
+    bindings: &scp::FleetBindings,
+    cluster: &str,
+    region: Option<&str>,
+    profile: Option<&str>,
+) -> scp::FleetBinding {
+    bindings
+        .for_cluster(cluster)
+        .cloned()
+        .unwrap_or_default()
+        .with_identity(region, profile)
+}
+
 impl OabMcp {
     /// Build the handler from the environment: the default AWS credential chain,
     /// `$OAB_CLUSTER` (then `oab`), and the opt-in fleet bindings file (a missing
@@ -553,6 +576,14 @@ impl OabMcp {
     /// one account/region would land in another. Passing the wizard's answer
     /// with the call closes that.
     ///
+    /// The lookup key is `cluster`, not the fleet name — a hand-written
+    /// `fleets.toml` whose fleets sit on different `cluster` keys but whose
+    /// caller passes neither `cluster` nor `fleet` would get one fleet's
+    /// identity layered onto another's target. No console path can do that:
+    /// `appendFleetBlock` never writes a `cluster` key, so `for_cluster` finds
+    /// nothing and only the caller's own pair applies. Resolving by fleet name
+    /// instead is a separate change to credential selection, not a deploy fix.
+    ///
     /// The overrides are layered onto the cluster's own binding, not
     /// substituted for it — a caller that pins only `region` still acts under
     /// whichever profile that binding selects. Falls back to [`Self::aws_for`]
@@ -565,24 +596,15 @@ impl OabMcp {
         profile: Option<&str>,
     ) -> aws_config::SdkConfig {
         let (region, profile) = (
-            region.filter(|s| !s.is_empty()),
-            profile.filter(|s| !s.is_empty()),
+            region.filter(|s| !s.trim().is_empty()),
+            profile.filter(|s| !s.trim().is_empty()),
         );
         if region.is_none() && profile.is_none() {
             return self.aws_for(cluster).await;
         }
-        // Short read-lock, clone out, drop the guard before any await. No
-        // binding governs the cluster (the common case for a console-created
-        // fleet — see the doc comment) ⇒ start from a blank one and let the
-        // caller's own answer stand as the only identity there is.
-        let mut binding = self
-            .bindings
-            .read()
-            .unwrap()
-            .for_cluster(cluster)
-            .cloned()
-            .unwrap_or_default();
-        binding = binding.with_identity(region, profile);
+        // Short read-lock, handed over by reference, guard dropped at this
+        // statement's end — nothing below holds a lock across an await.
+        let binding = identity_binding(&self.bindings.read().unwrap(), cluster, region, profile);
         scp::resolve_binding_config(&binding).await
     }
 
@@ -1345,6 +1367,95 @@ mod tests {
         assert_eq!(v["service"], "oab-prod-mira");
         assert_eq!(v["last_status"], "STOPPED");
         assert_eq!(v["stop_code"], "EssentialContainerExited");
+    }
+
+    // studio#111 — `identity_binding`, the seam `aws_or` resolves a deploy
+    // call's AWS identity through. Pure, so the layering rule and the
+    // cluster→binding lookup are pinned without an AWS client.
+
+    fn bindings_with_cluster_binding() -> scp::FleetBindings {
+        scp::FleetBindings {
+            fleets: vec![scp::FleetBinding {
+                name: "prod".into(),
+                runtime: scp::FleetRuntime::Ecs,
+                cluster: Some("oab".into()),
+                region: Some("us-east-1".into()),
+                profile: Some("prod-admin".into()),
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn identity_binding_layers_a_region_only_override_onto_the_cluster_binding() {
+        // The regression: substituting the caller's fields for the binding's
+        // would drop "prod-admin" and silently act as the ambient `[default]`.
+        let b = identity_binding(
+            &bindings_with_cluster_binding(),
+            "oab",
+            Some("eu-west-1"),
+            None,
+        );
+        assert_eq!(b.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(b.profile.as_deref(), Some("prod-admin"));
+    }
+
+    #[test]
+    fn identity_binding_layers_a_profile_only_override_onto_the_cluster_binding() {
+        let b = identity_binding(
+            &bindings_with_cluster_binding(),
+            "oab",
+            None,
+            Some("studio-prod"),
+        );
+        assert_eq!(b.region.as_deref(), Some("us-east-1"));
+        assert_eq!(b.profile.as_deref(), Some("studio-prod"));
+    }
+
+    #[test]
+    fn identity_binding_keeps_both_when_the_caller_names_both() {
+        let b = identity_binding(
+            &bindings_with_cluster_binding(),
+            "oab",
+            Some("ap-northeast-1"),
+            Some("studio-prod"),
+        );
+        assert_eq!(b.region.as_deref(), Some("ap-northeast-1"));
+        assert_eq!(b.profile.as_deref(), Some("studio-prod"));
+    }
+
+    #[test]
+    fn identity_binding_uses_the_callers_answer_when_no_fleet_governs_the_cluster() {
+        // The console's own shape: `[fleet.<name>]` declares no `cluster`, so
+        // `for_cluster` finds nothing and the caller's pair is all there is.
+        let b = identity_binding(
+            &scp::FleetBindings::default(),
+            "oab",
+            Some("ap-northeast-1"),
+            Some("studio-prod"),
+        );
+        assert_eq!(b.region.as_deref(), Some("ap-northeast-1"));
+        assert_eq!(b.profile.as_deref(), Some("studio-prod"));
+    }
+
+    #[test]
+    fn identity_binding_ignores_a_binding_for_a_different_cluster() {
+        let b = identity_binding(
+            &bindings_with_cluster_binding(),
+            "other",
+            Some("eu-west-1"),
+            None,
+        );
+        assert_eq!(b.region.as_deref(), Some("eu-west-1"));
+        assert_eq!(b.profile, None);
+    }
+
+    #[test]
+    fn identity_binding_leaves_the_binding_untouched_when_the_caller_names_neither() {
+        let b = identity_binding(&bindings_with_cluster_binding(), "oab", None, None);
+        assert_eq!(b.region.as_deref(), Some("us-east-1"));
+        assert_eq!(b.profile.as_deref(), Some("prod-admin"));
+        assert_eq!(b.cluster.as_deref(), Some("oab"));
     }
 
     #[test]

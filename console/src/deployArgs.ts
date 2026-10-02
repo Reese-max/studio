@@ -79,7 +79,11 @@ export function awsIdentityFor(source: AwsIdentitySource): {
 }
 
 /**
- * Trimmed value, or `undefined` for anything blank — every optional field is
+ * Trimmed value, or `undefined` for anything blank. Trimming is a behavior
+ * change for one pre-existing field — `local_config_folder` used to cross the
+ * wire verbatim — and is intentional: a padded path names a different directory
+ * than the trimmed one. The only in-app source of it is the native directory
+ * picker (`main.ts`'s Config-folder setting), which returns unpadded paths. — every optional field is
  * omitted from the call rather than sent as `""`, because the sidecar's own
  * "absent means default" rules (`acp_enabled` defaulting on, `context`
  * falling back to the kubeconfig current-context) key off absence, not on an
