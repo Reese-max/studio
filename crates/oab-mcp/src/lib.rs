@@ -47,7 +47,9 @@ pub struct OabMcp {
     /// Where the bindings were loaded from (surfaced by `fleet_config` so the
     /// operator knows which file to edit); `None` when no config dir resolved.
     bindings_path: Option<String>,
-    /// Per-cluster resolved configs, memoized so a binding is resolved once.
+    /// Resolved configs, memoized per identity source (`fleet:<name>` /
+    /// `cluster:<cluster>`) so a binding is resolved once and can't be served
+    /// to a different source.
     resolved: Arc<Mutex<HashMap<String, aws_config::SdkConfig>>>,
 }
 
@@ -374,11 +376,10 @@ impl Target {
 /// `target` before reaching any of this).
 fn base_binding(
     bindings: &scp::FleetBindings,
-    args: &Map<String, Value>,
+    fleet: Option<&str>,
     cluster: &str,
 ) -> Option<scp::FleetBinding> {
-    args.get("fleet")
-        .and_then(Value::as_str)
+    fleet
         .and_then(|name| bindings.get(name))
         .filter(|b| b.runtime == scp::FleetRuntime::Ecs)
         .cloned()
@@ -399,9 +400,42 @@ fn identity_binding(
     region: Option<&str>,
     profile: Option<&str>,
 ) -> scp::FleetBinding {
-    base_binding(bindings, args, cluster)
+    base_binding(bindings, args.get("fleet").and_then(Value::as_str), cluster)
         .unwrap_or_default()
         .with_identity(region, profile)
+}
+
+/// The credential a call should act under, as `(base binding, memo key)` — the
+/// whole decision [`OabMcp::aws_for_binding`] makes, minus the `.await`.
+///
+/// `base` is `None` when nothing governs the call, **or** when the governing
+/// binding names no profile and no region of its own: both mean "the ambient
+/// chain answers", and answering it with the already-loaded config is cheaper
+/// than resolving a duplicate. Keeping that short-circuit here (rather than
+/// inline in the async fn) is what makes it testable without an AWS client.
+fn binding_and_key(
+    bindings: &scp::FleetBindings,
+    fleet: Option<&str>,
+    cluster: &str,
+) -> (Option<scp::FleetBinding>, String) {
+    let key = memo_key(fleet, cluster);
+    match fleet {
+        Some(_) => {
+            let binding = base_binding(bindings, fleet, cluster)
+                .filter(|b| b.profile.is_some() || b.region.is_some());
+            (binding, key)
+        }
+        None => {
+            // Short read-lock: clone the governing binding, then drop the guard
+            // before any await (never hold a std lock across .await).
+            let guard = bindings;
+            let binding = guard
+                .for_cluster(cluster)
+                .filter(|b| b.profile.is_some() || b.region.is_some())
+                .cloned();
+            (binding, key)
+        }
+    }
 }
 
 /// The memo key for a resolved credential: namespaced by identity source, so a
@@ -598,9 +632,7 @@ impl OabMcp {
     ) -> aws_config::SdkConfig {
         // Short read-lock, handed over by reference, guard dropped at this
         // statement's end — nothing below holds a lock across an await.
-        let binding = base_binding(&self.bindings.read().unwrap(), args, cluster);
-        let fleet = args.get("fleet").and_then(Value::as_str);
-        self.aws_for_binding(cluster, fleet.map(|f| (f, binding)))
+        self.aws_for_binding(cluster, args.get("fleet").and_then(Value::as_str))
             .await
     }
 
@@ -612,28 +644,18 @@ impl OabMcp {
     async fn aws_for_binding(
         &self,
         cluster: &str,
-        named: Option<(&str, Option<scp::FleetBinding>)>,
+        named: Option<&str>,
     ) -> aws_config::SdkConfig {
-        let binding = match named.as_ref() {
-            Some((_, Some(b))) if b.profile.is_some() || b.region.is_some() => b.clone(),
-            // No binding, or one that names no credential of its own: the
-            // ambient chain is the answer, and it is already loaded — resolving
-            // it again would burn a config load and cache a duplicate under
-            // this fleet's key.
-            Some(_) => return self.aws.clone(),
-            None => {
-                // Short read-lock: clone the governing binding, then drop the
-                // guard before any await (never hold a std lock across .await).
-                let guard = self.bindings.read().unwrap();
-                match guard.for_cluster(cluster) {
-                    Some(b) if b.profile.is_some() || b.region.is_some() => b.clone(),
-                    _ => return self.aws.clone(),
-                }
-            }
+        // Short read-lock, handed over by reference, guard dropped at this
+        // statement's end — nothing below holds a lock across an await.
+        let (binding, key) = binding_and_key(&self.bindings.read().unwrap(), named, cluster);
+        let Some(binding) = binding else {
+            // Nothing governs this call, or what does names no credential of
+            // its own: the ambient chain answers, and it is already loaded —
+            // resolving it again would burn a config load and cache a duplicate
+            // under this source's key.
+            return self.aws.clone();
         };
-        // Memoize per *identity source*, not per cluster: two fleets sharing a
-        // cluster key resolve independently.
-        let key = memo_key(named.map(|(name, _)| name), cluster);
         if let Some(cfg) = self.resolved.lock().unwrap().get(&key) {
             return cfg.clone();
         }
@@ -666,12 +688,18 @@ impl OabMcp {
     /// pins only `region` still acts under whichever profile that base selects.
     /// With neither override it is exactly [`Self::aws_for_call`].
     ///
-    /// Note the asymmetry this deliberately leaves: the console writes
-    /// `[fleet.<name>]` blocks with no `cluster` key, and `target()` rejects a
-    /// `fleet`-scoped ECS call whose binding omits one — so for a console-created
-    /// fleet the reads never reach this seam at all, and it is the deploy call
-    /// (which passes `cluster`, not `fleet`) that carries the fix. Closing that
-    /// `target()` gate is a separate, pre-existing change.
+    /// Note the asymmetry this deliberately leaves. The console writes
+    /// `[fleet.<name>]` blocks with no `cluster` key and sends no `fleet`, so
+    /// for a console-created fleet this base is `for_cluster`'s *first* match —
+    /// and none, since no such block declares a `cluster`; only the caller's own
+    /// pair applies, which is the point. Two further consequences, both
+    /// pre-existing and neither fixable from here: `target()` rejects a
+    /// `fleet`-scoped ECS call whose binding omits `cluster`, so reads of a
+    /// console-created fleet never reach this seam at all; and an operator who
+    /// hand-adds a `cluster` key in the console's `fleets.toml` editor can
+    /// reach the cluster base, where a region-only override pairs with that
+    /// cluster's first fleet's profile. Both need credential selection keyed on
+    /// the governing fleet rather than the cluster — a separate change.
     async fn aws_or(
         &self,
         args: &Map<String, Value>,
@@ -984,8 +1012,8 @@ impl OabMcp {
             .get("image")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required arg: image"))?;
-        // studio#111: the caller's own AWS identity, overriding the per-cluster
-        // binding lookup — see `aws_or`.
+        // studio#111: the caller's own AWS identity, overriding the fleet
+        // binding's `region`/`profile` — see `aws_or`.
         let region = args.get("region").and_then(Value::as_str);
         let profile = args.get("profile").and_then(Value::as_str);
         let input = scp::AgentWizardInput {
@@ -1269,7 +1297,7 @@ impl OabMcp {
     /// Write tool: persist the whole `fleets.toml` from the editor's `text`
     /// after validating it parses (a bad edit never lands on disk), then
     /// hot-reload — swap in the reparsed bindings and drop the memoized
-    /// per-cluster configs (a changed profile/region invalidates them). Returns
+    /// configs (a changed profile/region invalidates every one of them). Returns
     /// the new `fleet_config`.
     fn t_fleet_write(&self, args: &Map<String, Value>) -> Result<Value> {
         let text = args
@@ -1601,7 +1629,7 @@ mod tests {
         // way to tell them apart, so it has to win over `for_cluster`'s first
         // match (which would always be "prod").
         let bindings = bindings_sharing_one_cluster_key();
-        let b = base_binding(&bindings, &args(Some("staging")), "oab").expect("named fleet");
+        let b = base_binding(&bindings, Some("staging"), "oab").expect("named fleet");
         assert_eq!(b.name, "staging");
         assert_eq!(b.profile.as_deref(), Some("staging-admin"));
     }
@@ -1624,7 +1652,7 @@ mod tests {
     #[test]
     fn base_binding_falls_back_to_the_cluster_lookup_without_a_fleet_name() {
         let bindings = bindings_sharing_one_cluster_key();
-        let b = base_binding(&bindings, &args(None), "oab").expect("cluster binding");
+        let b = base_binding(&bindings, None, "oab").expect("cluster binding");
         assert_eq!(b.name, "prod");
     }
 
@@ -1633,7 +1661,7 @@ mod tests {
         // A credential lookup must never add an error the caller didn't have —
         // `named_fleet`/`target` already reject an unknown fleet by name.
         let bindings = bindings_sharing_one_cluster_key();
-        let b = base_binding(&bindings, &args(Some("ghost")), "oab").expect("cluster binding");
+        let b = base_binding(&bindings, Some("ghost"), "oab").expect("cluster binding");
         assert_eq!(b.name, "prod");
     }
 
@@ -1656,15 +1684,15 @@ mod tests {
                 },
             ],
         };
-        let b = base_binding(&bindings, &args(Some("kube")), "oab").expect("ecs binding");
+        let b = base_binding(&bindings, Some("kube"), "oab").expect("ecs binding");
         assert_eq!(b.name, "prod");
     }
 
     #[test]
     fn has_identity_override_rejects_blanks_so_the_ambient_path_still_works() {
-        // The guard in `aws_or` that keeps the per-cluster memo on credential-
-        // less calls: a client that always sends both fields must still reach
-        // it when both are empty.
+        // The guard in `aws_or` that keeps credential-less calls on the
+        // memoized ambient path: a client that always sends both fields must
+        // still reach it when both are empty.
         assert!(!has_identity_override(None, None));
         assert!(!has_identity_override(Some(""), Some("   ")));
         assert!(!has_identity_override(Some("\t",), None));
@@ -1687,6 +1715,65 @@ mod tests {
         // still lands in its own.
         assert_ne!(memo_key(Some("oab"), "oab"), memo_key(None, "oab"));
         assert_ne!(memo_key(Some("cluster:oab"), "oab"), memo_key(None, "oab"));
+    }
+
+    #[test]
+    fn binding_and_key_returns_the_named_fleets_credential_and_its_own_key() {
+        let bindings = bindings_sharing_one_cluster_key();
+        let (b, key) = binding_and_key(&bindings, Some("staging"), "oab");
+        assert_eq!(key, "fleet:staging");
+        let b = b.expect("staging resolves its own credential");
+        assert_eq!(b.profile.as_deref(), Some("staging-admin"));
+    }
+
+    #[test]
+    fn binding_and_key_short_circuits_a_credential_less_named_fleet_to_ambient() {
+        // A binding that names no profile/region has nothing to resolve — the
+        // ambient chain answers, and it is already loaded, so it must not be
+        // resolved again or cached a second time under this fleet's key.
+        let bindings = scp::FleetBindings {
+            fleets: vec![scp::FleetBinding {
+                name: "bare".into(),
+                runtime: scp::FleetRuntime::Ecs,
+                cluster: Some("oab".into()),
+                ..Default::default()
+            }],
+        };
+        let (b, key) = binding_and_key(&bindings, Some("bare"), "oab");
+        assert_eq!(key, "fleet:bare");
+        assert!(b.is_none());
+    }
+
+    #[test]
+    fn binding_and_key_short_circuits_when_no_fleet_governs_the_call() {
+        let (b, key) = binding_and_key(&scp::FleetBindings::default(), None, "oab");
+        assert_eq!(key, "cluster:oab");
+        assert!(b.is_none());
+    }
+
+    #[test]
+    fn binding_and_key_falls_back_to_the_cluster_binding_without_a_fleet_name() {
+        let bindings = bindings_sharing_one_cluster_key();
+        let (b, key) = binding_and_key(&bindings, None, "oab");
+        assert_eq!(key, "cluster:oab");
+        assert_eq!(b.expect("cluster binding").name, "prod");
+    }
+
+    #[test]
+    fn binding_and_key_short_circuits_a_credential_less_cluster_binding() {
+        let bindings = scp::FleetBindings {
+            fleets: vec![scp::FleetBinding {
+                name: "bare".into(),
+                runtime: scp::FleetRuntime::Ecs,
+                cluster: Some("oab".into()),
+                region: None,
+                profile: None,
+                ..Default::default()
+            }],
+        };
+        let (b, key) = binding_and_key(&bindings, None, "oab");
+        assert_eq!(key, "cluster:oab");
+        assert!(b.is_none());
     }
 
     #[test]

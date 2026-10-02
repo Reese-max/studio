@@ -992,9 +992,9 @@ impl FleetBinding {
 
     /// A copy of this binding with a caller's own `region`/`profile` layered
     /// on top (studio#111): each field the caller names replaces this
-    /// binding's, each one it leaves unset is kept, and an `None` binding
-    /// (`for_cluster` found no fleet for the cluster) yields a
-    /// credentials-only binding.
+    /// binding's, each one it leaves unset is kept, and a
+    /// `FleetBinding::default()` — what the caller falls back to when no fleet
+    /// governs the call — yields a credentials-only binding.
     ///
     /// **Layering, not substitution** is the point. A deploy call that pins
     /// only a region must keep acting under whatever profile the governing
