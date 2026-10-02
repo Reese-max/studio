@@ -81,11 +81,14 @@ export function awsIdentityFor(source: AwsIdentitySource): {
 /**
  * Trimmed value, or `undefined` for anything blank.
  *
- * Trimming is a behavior change for the two fields that used to cross the wire
- * verbatim — `chat_platform` and `local_config_folder` — and is intentional: a
- * padded platform name selects no platform, and a padded path names a different
- * directory. Neither source produces padding in-app (a `<select>` value, and
- * the native directory picker `main.ts`'s Config-folder setting uses).
+ * Trimming is a behavior change for the four fields that used to cross the wire
+ * verbatim — `chat_platform`, `local_config_folder`, and the k8s pair
+ * `context`/`expected_principal` — and is intentional in each: a padded platform
+ * name or kubeconfig context selects neither, a padded path names a different
+ * directory, and a padded `expected_principal` matches no principal. No in-app
+ * source produces padding (a `<select>` value, the native directory picker
+ * `main.ts`'s Config-folder setting uses, and a `fleets.toml` an operator could
+ * hand-edit) — but a hand-edited file can.
  */
 function orUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();

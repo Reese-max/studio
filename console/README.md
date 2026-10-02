@@ -58,12 +58,15 @@ A deploy is the one call where the wizard's AWS answers have nowhere else to
 live: `fleets.toml` is written only *after* a confirmed successful provision
 (ADR-83 §7.5), so on a first create the Region + Credential profile the
 identity step collected exist solely in the `deploy_provision_agent` arguments
-(`src/deployArgs.ts`). That matters because `oab-mcp` resolves the managing
-credential per ECS cluster, keyed on a binding's `cluster` key — which a
-`[fleet.<name>]` block need not carry (the console's writer never emits one) —
-so the recorded pair is read by nothing and the ambient `[default]` chain
-answers instead. On a first create that chain is also what `build_default_manifest`'s
-VPC/subnet/security-group discovery runs against. Drop the fields and a fleet
-created for one account/region lands in another. Naming only one of the two is
-safe: the sidecar layers it onto the binding's own answer rather than
-substituting for it.
+(`src/deployArgs.ts`).
+
+`oab-mcp` resolves the managing credential in two steps: the fleet a call *named*
+(`fleet:`) wins, else the binding whose `cluster` key matches, else the ambient
+`[default]` chain. A console call names no fleet, and a console-written
+`[fleet.<name>]` block declares no `cluster` key — so neither key matches, the
+recorded pair is read by nothing, and the ambient chain answers. On a first
+create that chain is also what `build_default_manifest`'s VPC/subnet/
+security-group discovery runs against, so a fleet created for one
+account/region would land in another. Drop the fields and the wizard's answer is
+silently discarded. Naming only one of the two is safe: the sidecar layers it
+onto whatever base binding it found rather than substituting for it.

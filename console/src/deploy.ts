@@ -102,11 +102,12 @@ function randomGreekName(): string {
 // account were fixed the moment the fleet was created.
 //
 // studio#111: the `region`/`profile` pair rides along for the same reason.
-// The sidecar resolves a fleet's managing credential per ECS cluster, keyed
-// on a binding's `cluster` key, which a `[fleet.<name>]` block need not carry
-// (this console's writer never emits one) — so the recorded pair is read by
-// nothing and the ambient `[default]` chain answers instead. The answer has
-// to travel with the call (see `deployArgs.ts`).
+// The sidecar resolves a fleet's managing credential by the fleet a call names
+// (`fleet:`), else by a binding's `cluster` key — and this console's wizard
+// names neither (it passes no `fleet`, and its writer emits no `cluster` key),
+// so the recorded pair is read by nothing and the ambient `[default]` chain
+// answers instead. The answer has to travel with the call (see
+// `deployArgs.ts`).
 export type DeployMode =
   | { kind: "new-fleet" }
   | {

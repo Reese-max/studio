@@ -415,9 +415,10 @@ fn identity_binding(
 /// inline in the async fn) is what makes it testable without an AWS client.
 fn binding_and_key(
     bindings: &scp::FleetBindings,
-    fleet: Option<&str>,
+    args: &Map<String, Value>,
     cluster: &str,
 ) -> (Option<scp::FleetBinding>, String) {
+    let fleet = args.get("fleet").and_then(Value::as_str);
     let key = memo_key(fleet, cluster);
     match fleet {
         Some(_) => {
@@ -632,23 +633,16 @@ impl OabMcp {
     ) -> aws_config::SdkConfig {
         // Short read-lock, handed over by reference, guard dropped at this
         // statement's end — nothing below holds a lock across an await.
-        self.aws_for_binding(cluster, args.get("fleet").and_then(Value::as_str))
-            .await
+        self.aws_for_binding(args, cluster).await
     }
 
-    /// Resolve (and memoize) the credential the base binding selects; the
-    /// already-loaded ambient chain when there is no base binding, or it names
-    /// neither a profile nor a region. `named` is the `(fleet name, binding)`
-    /// pair the lookup produced, kept only so the memo key can't collide with a
-    /// different fleet's entry.
-    async fn aws_for_binding(
-        &self,
-        cluster: &str,
-        named: Option<&str>,
-    ) -> aws_config::SdkConfig {
+    /// Resolve (and memoize) the credential the base binding selects, or the
+    /// already-loaded ambient chain when there is none worth resolving — the
+    /// whole decision being [`binding_and_key`].
+    async fn aws_for_binding(&self, args: &Map<String, Value>, cluster: &str) -> aws_config::SdkConfig {
         // Short read-lock, handed over by reference, guard dropped at this
         // statement's end — nothing below holds a lock across an await.
-        let (binding, key) = binding_and_key(&self.bindings.read().unwrap(), named, cluster);
+        let (binding, key) = binding_and_key(&self.bindings.read().unwrap(), args, cluster);
         let Some(binding) = binding else {
             // Nothing governs this call, or what does names no credential of
             // its own: the ambient chain answers, and it is already loaded —
@@ -1689,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn has_identity_override_rejects_blanks_so_the_ambient_path_still_works() {
+    fn has_identity_override_rejects_blanks() {
         // The guard in `aws_or` that keeps credential-less calls on the
         // memoized ambient path: a client that always sends both fields must
         // still reach it when both are empty.
@@ -1720,7 +1714,7 @@ mod tests {
     #[test]
     fn binding_and_key_returns_the_named_fleets_credential_and_its_own_key() {
         let bindings = bindings_sharing_one_cluster_key();
-        let (b, key) = binding_and_key(&bindings, Some("staging"), "oab");
+        let (b, key) = binding_and_key(&bindings, &args(Some("staging")), "oab");
         assert_eq!(key, "fleet:staging");
         let b = b.expect("staging resolves its own credential");
         assert_eq!(b.profile.as_deref(), Some("staging-admin"));
@@ -1739,14 +1733,14 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let (b, key) = binding_and_key(&bindings, Some("bare"), "oab");
+        let (b, key) = binding_and_key(&bindings, &args(Some("bare")), "oab");
         assert_eq!(key, "fleet:bare");
         assert!(b.is_none());
     }
 
     #[test]
     fn binding_and_key_short_circuits_when_no_fleet_governs_the_call() {
-        let (b, key) = binding_and_key(&scp::FleetBindings::default(), None, "oab");
+        let (b, key) = binding_and_key(&scp::FleetBindings::default(), &args(None), "oab");
         assert_eq!(key, "cluster:oab");
         assert!(b.is_none());
     }
@@ -1754,7 +1748,7 @@ mod tests {
     #[test]
     fn binding_and_key_falls_back_to_the_cluster_binding_without_a_fleet_name() {
         let bindings = bindings_sharing_one_cluster_key();
-        let (b, key) = binding_and_key(&bindings, None, "oab");
+        let (b, key) = binding_and_key(&bindings, &args(None), "oab");
         assert_eq!(key, "cluster:oab");
         assert_eq!(b.expect("cluster binding").name, "prod");
     }
@@ -1771,7 +1765,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let (b, key) = binding_and_key(&bindings, None, "oab");
+        let (b, key) = binding_and_key(&bindings, &args(None), "oab");
         assert_eq!(key, "cluster:oab");
         assert!(b.is_none());
     }

@@ -173,6 +173,44 @@ describe("the two seams compose — what an add-instance submit actually sends",
   });
 });
 
+describe("the deployed identity and the recorded one cannot drift", () => {
+  // The submit handler reads the identity once (`awsIdentityFor`) and feeds it
+  // to both the call and `appendFleetBlock`'s `[fleet.<name>]` entry. Feeding
+  // the *same* values to both is the invariant — a second read of the form
+  // there is what let them drift.
+  const ecsEntry = (region: string | null, profile: string | null) => ({
+    name: "support",
+    member: "oab-default-zeus",
+    expectedPrincipal: null,
+    runtime: { kind: "ecs" as const, region, profile },
+  });
+
+  it("records exactly what it deployed under", () => {
+    const identity = awsIdentityFor({
+      kind: "new-fleet",
+      region: "  ap-northeast-1  ",
+      profile: "studio-prod",
+    });
+    const call = provisionAgentArgs({ ...ecs, acpEnabled: true, ...identity });
+    const entry = ecsEntry(identity.region ?? null, identity.profile ?? null);
+    expect(call.region).toBe("ap-northeast-1");
+    expect(entry.runtime.region).toBe(call.region);
+    expect(entry.runtime.profile).toBe(call.profile);
+  });
+
+  it("records a blank identity as absent, not as an empty string", () => {
+    // An empty `region = ""` in fleets.toml would later look like a pinned
+    // (blank) region to every consumer.
+    const identity = awsIdentityFor({ kind: "new-fleet", region: "   ", profile: "" });
+    expect(identity).toEqual({ region: undefined, profile: undefined });
+    expect(ecsEntry(identity.region ?? null, identity.profile ?? null).runtime).toEqual({
+      kind: "ecs",
+      region: null,
+      profile: null,
+    });
+  });
+});
+
 describe("provisionAgentArgs — optional wizard fields", () => {
   it("forwards chat platform secrets and the local config folder when set", () => {
     const args = provisionAgentArgs({
@@ -238,6 +276,19 @@ describe("provisionAgentArgs — optional wizard fields", () => {
     expect(args.local_config_folder).toBe("/home/op/studio-config");
     expect(args.region).toBe("ap-northeast-1");
     expect(args.profile).toBe("studio-prod");
+  });
+
+  it("trims the k8s placement pair too", () => {
+    // A hand-edited `fleets.toml` is the only in-app source of these (via
+    // add-instance's inherited placement), and padding on either one selects
+    // nothing.
+    const args = provisionAgentArgs({
+      ...ecs,
+      acpEnabled: true,
+      k8s: { context: "  orbstack  ", expectedPrincipal: "  system:serviceaccount:persephone:runner  " },
+    });
+    expect(args.context).toBe("orbstack");
+    expect(args.expected_principal).toBe("system:serviceaccount:persephone:runner");
   });
 
   it("carries acp_enabled verbatim — the sidecar owns the default-when-absent rule", () => {
