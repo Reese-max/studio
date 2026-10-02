@@ -405,6 +405,17 @@ fn identity_binding(
         .with_identity(region, profile)
 }
 
+/// The caller's own `region`/`profile` override, read out of a call's args, as
+/// `(region, profile)` in that order. Extracted beside [`base_binding`] so the
+/// reading itself is covered: a handler that stopped forwarding these, or
+/// swapped the two, would otherwise no-op with every test in the repo green.
+fn identity_args(args: &Map<String, Value>) -> (Option<&str>, Option<&str>) {
+    (
+        args.get("region").and_then(Value::as_str),
+        args.get("profile").and_then(Value::as_str),
+    )
+}
+
 /// The credential a call should act under, as `(base binding, memo key)` — the
 /// whole decision [`OabMcp::aws_for_binding`] makes, minus the `.await`.
 ///
@@ -419,10 +430,10 @@ fn identity_binding(
 /// declares no credential of its own now answers ambient, where `for_cluster`'s
 /// first match on the same `cluster` key used to lend it that sibling's
 /// credential. Shadowing a sibling by accident is exactly what per-fleet scoping
-/// exists to stop, and `FleetBinding::profile`'s documented semantics are
-/// "ambient default, explicit override" — a credential-less block says nothing,
-/// so ambient is what it asks for. It can still be given one, per call or in its
-/// block.
+/// exists to stop, and `resolve_binding_config` pins only what a binding
+/// actually names — a credential-less block says nothing about the credential,
+/// so ambient is what it is asking for. It can still be given one, per call or
+/// in its own block.
 fn binding_and_key(
     bindings: &scp::FleetBindings,
     args: &Map<String, Value>,
@@ -922,8 +933,7 @@ impl OabMcp {
             .ok_or_else(|| anyhow::anyhow!("missing required arg: template"))?;
         let overlay = args.get("overlay").and_then(Value::as_str);
         let image = args.get("image_tag").and_then(Value::as_str);
-        let region = args.get("region").and_then(Value::as_str);
-        let profile = args.get("profile").and_then(Value::as_str);
+        let (region, profile) = identity_args(args);
         let library: scp::Library = serde_json::from_value(
             args.get("library")
                 .cloned()
@@ -1016,8 +1026,7 @@ impl OabMcp {
             .ok_or_else(|| anyhow::anyhow!("missing required arg: image"))?;
         // studio#111: the caller's own AWS identity, overriding the fleet
         // binding's `region`/`profile` — see `aws_or`.
-        let region = args.get("region").and_then(Value::as_str);
-        let profile = args.get("profile").and_then(Value::as_str);
+        let (region, profile) = identity_args(args);
         let input = scp::AgentWizardInput {
             api_key: args.get("api_key").and_then(Value::as_str).map(str::to_string),
             chat_platform: args.get("chat_platform").and_then(Value::as_str).map(str::to_string),
@@ -1702,12 +1711,38 @@ mod tests {
         assert!(has_identity_override(None, Some("studio-prod")));
     }
 
-    /// A handler with no ambient work to do: `load()` only reads the local
-    /// config files (there are none here) — region and credentials stay lazy, so
-    /// nothing reaches the network.
+    /// A handler with no ambient work left to do: the region is pinned on the
+    /// loader because `ConfigLoader::load()` eagerly awaits the default region
+    /// chain (env → profile file → **IMDS**), and with no `AWS_REGION` and no
+    /// `~/.aws/config` that chain reaches for `169.254.169.254`, which in a
+    /// sandbox *times out* rather than failing fast. Credentials stay lazy.
+    #[test]
+    fn identity_args_reads_region_and_profile_in_order() {
+        // Both provision tools call this; swapping the tuple's halves would
+        // provision under the profile's region instead of the named one.
+        let mut args = Map::new();
+        args.insert("region".to_string(), Value::String("ap-northeast-1".into()));
+        args.insert("profile".to_string(), Value::String("studio-prod".into()));
+        assert_eq!(
+            identity_args(&args),
+            (Some("ap-northeast-1"), Some("studio-prod"))
+        );
+    }
+
+    #[test]
+    fn identity_args_is_absent_for_a_call_that_names_neither() {
+        assert_eq!(identity_args(&Map::new()), (None, None));
+        // A non-string value is as absent as a missing key — `aws_or`'s
+        // `has_identity_override` then takes the memoized ambient path.
+        let mut args = Map::new();
+        args.insert("region".to_string(), Value::Bool(true));
+        assert_eq!(identity_args(&args), (None, None));
+    }
+
     async fn handler_for_test(bindings: scp::FleetBindings) -> OabMcp {
         OabMcp {
             aws: aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_config::Region::new("us-east-1"))
                 .load()
                 .await,
             default_cluster: "oab".into(),
