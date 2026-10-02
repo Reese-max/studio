@@ -21,6 +21,7 @@
 
 import { describe, it, expect } from "vitest";
 import { provisionAgentArgs, awsIdentityFor } from "./deployArgs";
+import { appendFleetBlock } from "./fleetToml";
 
 const ecs = {
   image: "ghcr.io/openabdev/openab:0.10.0-beta.3-codex",
@@ -175,9 +176,9 @@ describe("the two seams compose — what an add-instance submit actually sends",
 
 describe("the deployed identity and the recorded one cannot drift", () => {
   // The submit handler reads the identity once (`awsIdentityFor`) and feeds it
-  // to both the call and `appendFleetBlock`'s `[fleet.<name>]` entry. Feeding
-  // the *same* values to both is the invariant — a second read of the form
-  // there is what let them drift.
+  // to both the call and the `[fleet.<name>]` entry. Asserted against the real
+  // `appendFleetBlock` output rather than a hand-rolled stand-in, because the
+  // thing that must not drift is what actually lands in `fleets.toml`.
   const ecsEntry = (region: string | null, profile: string | null) => ({
     name: "support",
     member: "oab-default-zeus",
@@ -192,22 +193,21 @@ describe("the deployed identity and the recorded one cannot drift", () => {
       profile: "studio-prod",
     });
     const call = provisionAgentArgs({ ...ecs, acpEnabled: true, ...identity });
-    const entry = ecsEntry(identity.region ?? null, identity.profile ?? null);
+    const toml = appendFleetBlock("", ecsEntry(identity.region ?? null, identity.profile ?? null));
     expect(call.region).toBe("ap-northeast-1");
-    expect(entry.runtime.region).toBe(call.region);
-    expect(entry.runtime.profile).toBe(call.profile);
+    expect(toml).toContain('region = "ap-northeast-1"');
+    expect(toml).toContain('profile = "studio-prod"');
   });
 
   it("records a blank identity as absent, not as an empty string", () => {
-    // An empty `region = ""` in fleets.toml would later look like a pinned
-    // (blank) region to every consumer.
+    // An empty `region = ""` in fleets.toml would later read as a pinned-but-
+    // blank region to every consumer of the file.
     const identity = awsIdentityFor({ kind: "new-fleet", region: "   ", profile: "" });
     expect(identity).toEqual({ region: undefined, profile: undefined });
-    expect(ecsEntry(identity.region ?? null, identity.profile ?? null).runtime).toEqual({
-      kind: "ecs",
-      region: null,
-      profile: null,
-    });
+    const toml = appendFleetBlock("", ecsEntry(identity.region ?? null, identity.profile ?? null));
+    expect(toml).not.toContain("region");
+    expect(toml).not.toContain("profile");
+    expect(toml).toContain('members = ["oab-default-zeus"]');
   });
 });
 

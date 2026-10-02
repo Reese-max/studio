@@ -178,8 +178,8 @@ pub fn tools() -> Vec<Tool> {
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
                     "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
-                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the `fleet` binding's — or else the `cluster` binding's — `region` (studio#111). Needed whenever that binding can't supply it: a `[fleet.<name>]` block need not declare the `cluster` key a per-cluster lookup matches on (the console's writer never emits one), and on a first create there is no block at all yet." },
-                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the `fleet` binding's — or else the `cluster` binding's — `profile`. Same gap as `region` (studio#111)." }
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the `fleet` binding's — or else the `cluster` binding's — `region` (studio#111); it LAYERS, so a field you omit still comes from that binding. Needed whenever that binding can't supply it: a `[fleet.<name>]` block need not declare the `cluster` key a per-cluster lookup matches on (the console's writer never emits one), and on a first create there is no block at all yet. Not memoized: an override is never cached for later calls that name none." },
+                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the `fleet` binding's — or else the `cluster` binding's — `profile`; it LAYERS, so a field you omit still comes from that binding. Same gap as `region` (studio#111), and not memoized either." }
                 },
                 "required": ["library", "template", "name"]
             })),
@@ -205,8 +205,8 @@ pub fn tools() -> Vec<Tool> {
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
                     "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
-                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the `fleet` binding's — or else the `cluster` binding's — `region` (studio#111). Needed whenever that binding can't supply it: a `[fleet.<name>]` block need not declare the `cluster` key a per-cluster lookup matches on (the console's writer never emits one), and on a first create there is no block at all yet." },
-                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the `fleet` binding's — or else the `cluster` binding's — `profile`. Same gap as `region` (studio#111)." }
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the `fleet` binding's — or else the `cluster` binding's — `region` (studio#111); it LAYERS, so a field you omit still comes from that binding. Needed whenever that binding can't supply it: a `[fleet.<name>]` block need not declare the `cluster` key a per-cluster lookup matches on (the console's writer never emits one), and on a first create there is no block at all yet. Not memoized: an override is never cached for later calls that name none." },
+                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the `fleet` binding's — or else the `cluster` binding's — `profile`; it LAYERS, so a field you omit still comes from that binding. Same gap as `region` (studio#111), and not memoized either." }
                 },
                 "required": ["image", "name"]
             })),
@@ -411,8 +411,18 @@ fn identity_binding(
 /// `base` is `None` when nothing governs the call, **or** when the governing
 /// binding names no profile and no region of its own: both mean "the ambient
 /// chain answers", and answering it with the already-loaded config is cheaper
-/// than resolving a duplicate. Keeping that short-circuit here (rather than
-/// inline in the async fn) is what makes it testable without an AWS client.
+/// than resolving a duplicate. Keeping that short-circuit — and the `fleet`-name
+/// extraction that picks the memo namespace — here (rather than inline in the
+/// async fn) is what makes both testable without an AWS client.
+///
+/// Deliberate, operator-visible: a `fleet`-scoped call naming a binding that
+/// declares no credential of its own now answers ambient, where `for_cluster`'s
+/// first match on the same `cluster` key used to lend it that sibling's
+/// credential. Shadowing a sibling by accident is exactly what per-fleet scoping
+/// exists to stop, and `FleetBinding::profile`'s documented semantics are
+/// "ambient default, explicit override" — a credential-less block says nothing,
+/// so ambient is what it asks for. It can still be given one, per call or in its
+/// block.
 fn binding_and_key(
     bindings: &scp::FleetBindings,
     args: &Map<String, Value>,
@@ -1690,6 +1700,50 @@ mod tests {
         assert!(!has_identity_override(Some("\t",), None));
         assert!(has_identity_override(Some("eu-west-1"), None));
         assert!(has_identity_override(None, Some("studio-prod")));
+    }
+
+    /// A handler with no ambient work to do: `load()` only reads the local
+    /// config files (there are none here) — region and credentials stay lazy, so
+    /// nothing reaches the network.
+    async fn handler_for_test(bindings: scp::FleetBindings) -> OabMcp {
+        OabMcp {
+            aws: aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .load()
+                .await,
+            default_cluster: "oab".into(),
+            bindings: Arc::new(RwLock::new(bindings)),
+            bindings_path: None,
+            resolved: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_override_resolves_its_own_identity_without_touching_the_memo() {
+        // Memoizing an override would serve one caller's credential to every
+        // later call on the same fleet that names no override. The override
+        // path must therefore never reach `self.resolved` at all.
+        let handler = handler_for_test(scp::FleetBindings::default()).await;
+        let cfg = handler.aws_or(&args(None), "oab", Some("eu-west-1"), None).await;
+        assert_eq!(cfg.region().map(|r| r.to_string()).as_deref(), Some("eu-west-1"));
+        assert!(
+            handler.resolved.lock().unwrap().is_empty(),
+            "an override must not be cached under any identity source"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_free_call_does_reach_the_memo() {
+        // The other half: the early return has to hand the call to the normal
+        // memoized path, or every credential-less call re-resolves.
+        let handler = handler_for_test(bindings_sharing_one_cluster_key()).await;
+        let cfg = handler.aws_for_call(&args(None), "oab").await;
+        assert_eq!(cfg.region().map(|r| r.to_string()).as_deref(), Some("us-east-1"));
+        assert!(handler.resolved.lock().unwrap().contains_key("cluster:oab"));
+        // …and a second identical call is served from the memo, not resolved
+        // again (the entry count can't grow).
+        let before = handler.resolved.lock().unwrap().len();
+        handler.aws_for_call(&args(None), "oab").await;
+        assert_eq!(handler.resolved.lock().unwrap().len(), before);
     }
 
     #[test]
