@@ -138,6 +138,41 @@ describe("awsIdentityFor — which source answers a submit (studio#111)", () => 
   });
 });
 
+describe("the two seams compose — what an add-instance submit actually sends", () => {
+  it("takes region/profile from the fleet binding, not from empty form fields", () => {
+    // The panel's submit handler is exactly this composition; `mode.region` /
+    // `mode.profile` (the fleet `main.ts` read off `FleetConfigEntry`) have to
+    // be what reaches the call, since add-instance has no AWS field group.
+    const args = provisionAgentArgs({
+      ...ecs,
+      acpEnabled: true,
+      ...awsIdentityFor({ kind: "add-instance", region: "eu-west-1", profile: "prod-admin" }),
+    });
+    expect(args.region).toBe("eu-west-1");
+    expect(args.profile).toBe("prod-admin");
+  });
+
+  it("sends nothing to override with when the fleet records no identity", () => {
+    const args = provisionAgentArgs({
+      ...ecs,
+      acpEnabled: true,
+      ...awsIdentityFor({ kind: "add-instance", region: null, profile: null }),
+    });
+    expect("region" in args).toBe(false);
+    expect("profile" in args).toBe(false);
+  });
+
+  it("still carries the new-fleet identity step's own fields through", () => {
+    const args = provisionAgentArgs({
+      ...ecs,
+      acpEnabled: true,
+      ...awsIdentityFor({ kind: "new-fleet", region: "ap-northeast-1", profile: "studio-prod" }),
+    });
+    expect(args.region).toBe("ap-northeast-1");
+    expect(args.profile).toBe("studio-prod");
+  });
+});
+
 describe("provisionAgentArgs — optional wizard fields", () => {
   it("forwards chat platform secrets and the local config folder when set", () => {
     const args = provisionAgentArgs({

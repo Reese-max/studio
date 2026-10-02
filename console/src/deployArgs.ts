@@ -81,11 +81,11 @@ export function awsIdentityFor(source: AwsIdentitySource): {
 /**
  * Trimmed value, or `undefined` for anything blank.
  *
- * Trimming is a behavior change for one pre-existing field —
- * `local_config_folder` used to cross the wire verbatim — and is intentional: a
- * padded path names a different directory than the trimmed one. The only in-app
- * source of it is the native directory picker (`main.ts`'s Config-folder
- * setting), which returns unpadded paths.
+ * Trimming is a behavior change for the two fields that used to cross the wire
+ * verbatim — `chat_platform` and `local_config_folder` — and is intentional: a
+ * padded platform name selects no platform, and a padded path names a different
+ * directory. Neither source produces padding in-app (a `<select>` value, and
+ * the native directory picker `main.ts`'s Config-folder setting uses).
  */
 function orUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
