@@ -1,0 +1,110 @@
+// Pure translation of the deploy wizard's collected fields into the single
+// `deploy_provision_agent` argument object (`deploy.ts`'s submit handler calls
+// exactly one, so the panel stays a single step — studio#111).
+//
+// Why this is a module and not an inline object literal: everything the
+// sidecar needs to run its create-or-redeploy branch travels in that one
+// object, and on the *first* deploy there is nothing else to read it from.
+// `fleets.toml` — the only other carrier of the operator's answers — is
+// written strictly *after* a confirmed successful provision (ADR-83 §7.5), so
+// at create time the region/profile the identity step collected exist nowhere
+// but here. Drop them and `oab-mcp` falls back to the ambient `[default]`
+// credential chain, because a console-written `[fleet.<name>]` block carries no
+// `cluster` key and `FleetBindings::for_cluster` therefore never matches it —
+// so the first manifest's `default_networking` VPC/subnet/security-group
+// discovery (studio#111's create-from-scratch defaults, ported from
+// `oabctl create`'s wizard) and the apply itself would both run against
+// whichever account the ambient chain happens to resolve, while `fleets.toml`
+// goes on to record the region the operator actually picked.
+//
+// Pure and side-effect-free, like `fleetToml.ts` — the DOM reads stay in
+// `deploy.ts`, this only shapes what they collected.
+
+/** The k8s placement fields the submit sends alongside `provider: "k8s"`. */
+export interface K8sPlacement {
+  /** Kubeconfig context; omitted leaves the kubeconfig current-context in play. */
+  context?: string;
+  /** `system:serviceaccount:<ns>:<name>`, or omitted for the namespace default. */
+  expectedPrincipal?: string;
+}
+
+/** Everything the wizard collected for one agent, as read off the form. */
+export interface ProvisionAgentInput {
+  image: string;
+  name: string;
+  namespace: string;
+  apiKey?: string;
+  chatPlatform?: string;
+  chatBotToken?: string;
+  chatChannelSecret?: string;
+  acpEnabled: boolean;
+  acpToken?: string;
+  localConfigFolder?: string;
+  /** ECS only — the identity step's Region field. */
+  region?: string;
+  /** ECS only — the identity step's Credential profile field. */
+  profile?: string;
+  /** Present ⇔ this submit targets k8s (studio#104/#153). */
+  k8s?: K8sPlacement;
+}
+
+/**
+ * Trimmed value, or `undefined` for anything blank — every optional field is
+ * omitted from the call rather than sent as `""`, because the sidecar's own
+ * "absent means default" rules (`acp_enabled` defaulting on, `context`
+ * falling back to the kubeconfig current-context) key off absence, not on an
+ * empty string.
+ */
+function orUndefined(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * The `deploy_provision_agent` arguments for one agent deploy.
+ *
+ * `acp_enabled` is passed verbatim rather than omitted when off — the sidecar's
+ * default-when-absent rule (studio#119/128) is "on", so an ACP-off agent has
+ * to say so explicitly.
+ */
+export function provisionAgentArgs(input: ProvisionAgentInput): Record<string, unknown> {
+  const args: Record<string, unknown> = {
+    image: input.image,
+    name: input.name,
+    namespace: input.namespace,
+    acp_enabled: input.acpEnabled,
+  };
+
+  const apiKey = orUndefined(input.apiKey);
+  if (apiKey) args.api_key = apiKey;
+  const chatPlatform = orUndefined(input.chatPlatform);
+  if (chatPlatform) args.chat_platform = chatPlatform;
+  const chatBotToken = orUndefined(input.chatBotToken);
+  if (chatBotToken) args.chat_bot_token = chatBotToken;
+  const chatChannelSecret = orUndefined(input.chatChannelSecret);
+  if (chatChannelSecret) args.chat_channel_secret = chatChannelSecret;
+  // ACP-off: the sidecar provisions no ACP secret at all, so an operator-typed
+  // token has nowhere to land — never carry it.
+  const acpToken = input.acpEnabled ? orUndefined(input.acpToken) : undefined;
+  if (acpToken) args.acp_token = acpToken;
+  const localConfigFolder = orUndefined(input.localConfigFolder);
+  if (localConfigFolder) args.local_config_folder = localConfigFolder;
+
+  if (input.k8s) {
+    args.provider = "k8s";
+    const context = orUndefined(input.k8s.context);
+    if (context) args.context = context;
+    const expectedPrincipal = orUndefined(input.k8s.expectedPrincipal);
+    if (expectedPrincipal) args.expected_principal = expectedPrincipal;
+    // AWS credentials are deliberately not sent on a k8s submit: a k8s pod has
+    // no AWS credential chain (studio#104/#128), so a region/profile left over
+    // from the identity step's AWS field group could only mislead the sidecar.
+    return args;
+  }
+
+  const region = orUndefined(input.region);
+  if (region) args.region = region;
+  const profile = orUndefined(input.profile);
+  if (profile) args.profile = profile;
+  return args;
+}

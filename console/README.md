@@ -38,6 +38,9 @@ npm run build      # tsc + vite build → dist/
 | `src/source.ts` | `Source` interface + `MockSource` (fixtures) / `TauriSource` (desktop) |
 | `src/render.ts` | pure `rosterHtml(deployments)` → table; `renderRoster` sets it on the DOM |
 | `src/main.ts` | polls `Source` every 5s and re-renders |
+| `src/deploy.ts` | `[+ New fleet]` / `[+ Add instance]` wizard — collects the fields, then makes the one `deploy_provision_agent` call |
+| `src/deployArgs.ts` | pure wizard-fields → `deploy_provision_agent` args (studio#111) |
+| `src/fleetToml.ts` | pure `fleets.toml` block edits — the post-deploy config write |
 | `src/fixtures.ts` | stand-in roster data |
 
 ## Wiring to the core (slice-2)
@@ -48,3 +51,16 @@ dependency. Slice-2 adds `src-tauri/` whose Rust `deploy_list` command bridges
 to `studio-cp::observe_services` / `observe_deployment`. Because the boundary is
 the read-model shape (and, later, MCP), swapping `MockSource` → `TauriSource` is
 the only change the UI sees.
+
+## Deploy credentials (studio#111)
+
+A deploy is the one call where the wizard's AWS answers have nowhere else to
+live: `fleets.toml` is written only *after* a confirmed successful provision
+(ADR-83 §7.5), so on a first create the Region + Credential profile the
+identity step collected exist solely in the `deploy_provision_agent` arguments
+(`src/deployArgs.ts`). That matters because a console-written
+`[fleet.<name>]` block carries no `cluster` key, so `oab-mcp`'s per-cluster
+credential lookup never matches it and falls back to the ambient `[default]`
+chain — which, on a first create, is also what `build_default_manifest`'s
+VPC/subnet/security-group discovery runs against. Drop the fields and a fleet
+created for one account/region lands in another.

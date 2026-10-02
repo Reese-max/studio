@@ -742,6 +742,13 @@ if (fleetDetailEl) {
         context: fleet?.context ?? null,
         namespace: fleet?.namespace ?? null,
         expectedPrincipal: fleet?.expected_principal ?? null,
+        // studio#111: the fleet's recorded region/profile go along with the
+        // deploy for the same reason its k8s placement does — a
+        // console-written `[fleet.<name>]` block has no `cluster` key, so the
+        // sidecar can't resolve the fleet's own credential from it and would
+        // otherwise act as the ambient `[default]` account/region.
+        region: fleet?.region ?? null,
+        profile: fleet?.profile ?? null,
       });
       return;
     }

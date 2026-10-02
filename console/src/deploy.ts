@@ -14,6 +14,7 @@
 
 import type { Source } from "./source";
 import { appendMember, appendFleetBlock, fleetBlockExists } from "./fleetToml";
+import { provisionAgentArgs } from "./deployArgs";
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -99,6 +100,12 @@ function randomGreekName(): string {
 // "add-instance" (that only exists for "new-fleet"), so there's nothing to
 // re-collect from the operator — a k8s fleet's context/namespace/service
 // account were fixed the moment the fleet was created.
+//
+// studio#111: the `region`/`profile` pair rides along for the same reason.
+// A console-written `[fleet.<name>]` block has no `cluster` key, so the
+// sidecar's per-cluster credential lookup never matches it and falls back to
+// the ambient `[default]` chain — the answer has to travel with the call
+// instead (see `deployArgs.ts`).
 export type DeployMode =
   | { kind: "new-fleet" }
   | {
@@ -108,6 +115,8 @@ export type DeployMode =
       context: string | null;
       namespace: string | null;
       expectedPrincipal: string | null;
+      region: string | null;
+      profile: string | null;
     };
 
 // What the panel reports back once a deploy + fleets.toml write both succeed —
@@ -663,21 +672,32 @@ export function initDeployPanel(deps: DeployPanelDeps): DeployPanelHandle | null
     }
     deployBtn.disabled = true;
     setStatus(deployStatusEl, "deploying…");
+    // studio#111: the AWS identity the deploy runs against has to travel with
+    // the call — see `deployArgs.ts`. "new-fleet" reads it off the identity
+    // step's own fields; "add-instance" inherits the existing fleet's
+    // recorded region/profile, the same place it inherits its k8s placement.
+    const awsRegion = mode.kind === "new-fleet" ? regionInput.value : mode.region ?? "";
+    const awsProfile = mode.kind === "new-fleet" ? profileInput.value : mode.profile ?? "";
     let res: { image?: string; digest?: string; objects?: number };
     try {
-      res = await invoke("deploy_provision_agent", {
-        image,
-        name,
-        namespace,
-        api_key: apiKeyInput.value.trim() || undefined,
-        chat_platform: chatPlatform,
-        chat_bot_token: chatTokenInput.value.trim() || undefined,
-        chat_channel_secret: chatSecretInput.value.trim() || undefined,
-        acp_enabled: acpCheckbox.checked,
-        acp_token: acpCheckbox.checked ? acpTokenInput.value.trim() || undefined : undefined,
-        local_config_folder: localConfigFolder(),
-        ...(isK8s ? { provider: "k8s", context, expected_principal: expectedPrincipal } : {}),
-      });
+      res = await invoke(
+        "deploy_provision_agent",
+        provisionAgentArgs({
+          image,
+          name,
+          namespace,
+          apiKey: apiKeyInput.value,
+          chatPlatform,
+          chatBotToken: chatTokenInput.value,
+          chatChannelSecret: chatSecretInput.value,
+          acpEnabled: acpCheckbox.checked,
+          acpToken: acpTokenInput.value,
+          localConfigFolder: localConfigFolder(),
+          region: awsRegion,
+          profile: awsProfile,
+          k8s: k8sTarget ? { context, expectedPrincipal } : undefined,
+        }),
+      );
     } catch (e) {
       setStatus(deployStatusEl, `deploy failed: ${errText(e)}`, "err");
       deployBtn.disabled = false;
@@ -698,8 +718,11 @@ export function initDeployPanel(deps: DeployPanelDeps): DeployPanelHandle | null
                 ? { kind: "k8s", context: context ?? null, namespace }
                 : {
                     kind: "ecs",
-                    region: regionInput.value.trim() || null,
-                    profile: profileInput.value.trim() || null,
+                    // Same values the deploy just ran under, not a second read
+                    // of the form — the recorded binding and the call that
+                    // created the agent have to agree.
+                    region: awsRegion.trim() || null,
+                    profile: awsProfile.trim() || null,
                   },
             })
           : appendMember(current.text, fleetName, service);

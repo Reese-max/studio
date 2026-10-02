@@ -175,7 +175,9 @@ pub fn tools() -> Vec<Tool> {
                     "fleet": { "type": "string", "description": "AWS only. Fleet name (see fleet_config): targets the fleet's cluster and managing credential; a write to a service outside the fleet's members is refused. Overrides the cluster arg." },
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
-                    "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." }
+                    "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a console-created fleet's `[fleet.<name>]` block has no `cluster` key, so the per-cluster lookup never matches it; on a first create there is no block at all yet." },
+                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the cluster's fleet binding — same gap as `region` (studio#111)." }
                 },
                 "required": ["library", "template", "name"]
             })),
@@ -200,7 +202,9 @@ pub fn tools() -> Vec<Tool> {
                     "fleet": { "type": "string", "description": "AWS only. Fleet name (see fleet_config): targets the fleet's cluster and managing credential; a write to a service outside the fleet's members is refused. Overrides the cluster arg." },
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
-                    "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." }
+                    "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a console-created fleet's `[fleet.<name>]` block has no `cluster` key, so the per-cluster lookup never matches it; on a first create there is no block at all yet." },
+                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the cluster's fleet binding — same gap as `region` (studio#111)." }
                 },
                 "required": ["image", "name"]
             })),
@@ -532,6 +536,44 @@ impl OabMcp {
         cfg
     }
 
+    /// [`Self::aws_for`], but with the caller's own `region`/`profile` taking
+    /// precedence (studio#111).
+    ///
+    /// `aws_for`'s per-cluster lookup keys on a binding's `cluster` field,
+    /// which a console-written `[fleet.<name>]` block doesn't have —
+    /// `appendFleetBlock` writes `runtime`/`region`/`profile`/`members`, not
+    /// `cluster` — so for every console-created fleet it falls through to the
+    /// ambient `[default]` chain. A deploy is exactly where that hurts most: on
+    /// a *first* create there is no block at all yet (`fleets.toml` is written
+    /// only after a confirmed successful provision), and the manifest built by
+    /// #111's create-from-scratch path resolves its VPC/subnet/security-group
+    /// defaults against whatever config it is handed, so a create meant for
+    /// one account/region would land in another. Passing the wizard's answer
+    /// with the call closes that.
+    ///
+    /// Falls back to [`Self::aws_for`] when the caller names neither, so every
+    /// existing caller keeps today's behavior.
+    async fn aws_or(
+        &self,
+        cluster: &str,
+        region: Option<&str>,
+        profile: Option<&str>,
+    ) -> aws_config::SdkConfig {
+        let (region, profile) = (
+            region.filter(|s| !s.is_empty()),
+            profile.filter(|s| !s.is_empty()),
+        );
+        if region.is_none() && profile.is_none() {
+            return self.aws_for(cluster).await;
+        }
+        scp::resolve_binding_config(&scp::FleetBinding {
+            region: region.map(str::to_string),
+            profile: profile.map(str::to_string),
+            ..Default::default()
+        })
+        .await
+    }
+
     async fn t_list(&self, args: &Map<String, Value>) -> Result<Value> {
         if let Some(b) = self.named_fleet(args)? {
             if b.runtime == scp::FleetRuntime::K8s {
@@ -726,6 +768,8 @@ impl OabMcp {
             .ok_or_else(|| anyhow::anyhow!("missing required arg: template"))?;
         let overlay = args.get("overlay").and_then(Value::as_str);
         let image = args.get("image_tag").and_then(Value::as_str);
+        let region = args.get("region").and_then(Value::as_str);
+        let profile = args.get("profile").and_then(Value::as_str);
         let library: scp::Library = serde_json::from_value(
             args.get("library")
                 .cloned()
@@ -778,7 +822,7 @@ impl OabMcp {
         }
 
         let outcome = scp::provision_from_library(
-            &self.aws_for(&cluster).await,
+            &self.aws_or(&cluster, region, profile).await,
             &cluster,
             namespace,
             name,
@@ -816,6 +860,10 @@ impl OabMcp {
             .get("image")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing required arg: image"))?;
+        // studio#111: the caller's own AWS identity, overriding the per-cluster
+        // binding lookup — see `aws_or`.
+        let region = args.get("region").and_then(Value::as_str);
+        let profile = args.get("profile").and_then(Value::as_str);
         let input = scp::AgentWizardInput {
             api_key: args.get("api_key").and_then(Value::as_str).map(str::to_string),
             chat_platform: args.get("chat_platform").and_then(Value::as_str).map(str::to_string),
@@ -872,7 +920,7 @@ impl OabMcp {
         }
 
         let outcome = scp::provision_agent(
-            &self.aws_for(&cluster).await,
+            &self.aws_or(&cluster, region, profile).await,
             &cluster,
             namespace,
             name,
