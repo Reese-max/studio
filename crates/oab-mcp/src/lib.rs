@@ -447,11 +447,11 @@ fn binding_and_key(
                 .filter(|b| b.profile.is_some() || b.region.is_some());
             (binding, key)
         }
+        // `bindings` arrives as a plain borrow — the caller's `read()` guard
+        // died at the end of its own statement, so nothing here can hold a lock
+        // across an await (there isn't one).
         None => {
-            // Short read-lock: clone the governing binding, then drop the guard
-            // before any await (never hold a std lock across .await).
-            let guard = bindings;
-            let binding = guard
+            let binding = bindings
                 .for_cluster(cluster)
                 .filter(|b| b.profile.is_some() || b.region.is_some())
                 .cloned();
@@ -1711,11 +1711,6 @@ mod tests {
         assert!(has_identity_override(None, Some("studio-prod")));
     }
 
-    /// A handler with no ambient work left to do: the region is pinned on the
-    /// loader because `ConfigLoader::load()` eagerly awaits the default region
-    /// chain (env → profile file → **IMDS**), and with no `AWS_REGION` and no
-    /// `~/.aws/config` that chain reaches for `169.254.169.254`, which in a
-    /// sandbox *times out* rather than failing fast. Credentials stay lazy.
     #[test]
     fn identity_args_reads_region_and_profile_in_order() {
         // Both provision tools call this; swapping the tuple's halves would
@@ -1739,6 +1734,11 @@ mod tests {
         assert_eq!(identity_args(&args), (None, None));
     }
 
+    /// A handler with no ambient work left to do: the region is pinned on the
+    /// loader because `ConfigLoader::load()` eagerly awaits the default region
+    /// chain (env → profile file → **IMDS**), and with no `AWS_REGION` and no
+    /// `~/.aws/config` that chain reaches for `169.254.169.254`, which in a
+    /// sandbox *times out* rather than failing fast. Credentials stay lazy.
     async fn handler_for_test(bindings: scp::FleetBindings) -> OabMcp {
         OabMcp {
             aws: aws_config::defaults(aws_config::BehaviorVersion::latest())

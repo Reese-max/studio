@@ -62,11 +62,16 @@ identity step collected exist solely in the `deploy_provision_agent` arguments
 
 `oab-mcp` resolves the managing credential in two steps: the fleet a call *named*
 (`fleet:`) wins, else the binding whose `cluster` key matches, else the ambient
-`[default]` chain. A console call names no fleet, and a console-written
-`[fleet.<name>]` block declares no `cluster` key — so neither key matches, the
-recorded pair is read by nothing, and the ambient chain answers. On a first
-create that chain is also what `build_default_manifest`'s VPC/subnet/
-security-group discovery runs against, so a fleet created for one
-account/region would land in another. Drop the fields and the wizard's answer is
-silently discarded. Naming only one of the two is safe: the sidecar layers it
-onto whatever base binding it found rather than substituting for it.
+`[default]` chain.
+
+The wizard's deploy call matches neither key: it names no fleet, and a
+console-written `[fleet.<name>]` block declares no `cluster` key — so the
+recorded pair is read by nothing and the ambient chain answers. (The console's
+*read* and scale calls do name a fleet, but `target()` rejects a `fleet`-scoped
+ECS call whose binding omits `cluster` — a separate, pre-existing gap; the
+deploy call steps around it by passing `cluster` instead.) On a first create the
+ambient chain is also what `build_default_manifest`'s VPC/subnet/security-group
+discovery runs against, so a fleet created for one account/region would land in
+another. Drop the fields and the wizard's answer is silently discarded. Naming
+only one of the two is safe: the sidecar layers it onto whatever base binding it
+found rather than substituting for it.

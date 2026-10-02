@@ -21,8 +21,8 @@ Reads project each ECS instance onto the canonical 6-state `AgentState`
 (ADR-1). `deploy_scale` is 0 (off) / 1 (on) only — an OAB service runs a single
 bot token, so >1 would duplicate responders. Both `deploy_provision*` create an
 agent that has no stored manifest yet by building a fresh one and applying it
-(studio#111) — see `deploy_provision_agent` in `src/lib.rs` for the arg-by-arg
-contract.
+(studio#111); the table above is the argument list, and each tool's description
+in `tools()` carries the per-argument contract.
 
 ## Run
 
