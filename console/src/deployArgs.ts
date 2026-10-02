@@ -10,7 +10,7 @@
 // at create time the region/profile the identity step collected exist nowhere
 // but here. Drop them and `oab-mcp` falls back to the ambient `[default]`
 // credential chain, because it resolves a fleet's credential per ECS cluster
-// and a `[fleet.<name]>` block need not declare the `cluster` key that lookup
+// and a `[fleet.<name>]` block need not declare the `cluster` key that lookup
 // matches on (this console's writer never emits one) — so the first manifest's
 // `default_networking` VPC/subnet/security-group discovery (studio#111's
 // create-from-scratch defaults, ported from `oabctl create`'s wizard) and the
@@ -79,15 +79,13 @@ export function awsIdentityFor(source: AwsIdentitySource): {
 }
 
 /**
- * Trimmed value, or `undefined` for anything blank. Trimming is a behavior
- * change for one pre-existing field — `local_config_folder` used to cross the
- * wire verbatim — and is intentional: a padded path names a different directory
- * than the trimmed one. The only in-app source of it is the native directory
- * picker (`main.ts`'s Config-folder setting), which returns unpadded paths. — every optional field is
- * omitted from the call rather than sent as `""`, because the sidecar's own
- * "absent means default" rules (`acp_enabled` defaulting on, `context`
- * falling back to the kubeconfig current-context) key off absence, not on an
- * empty string.
+ * Trimmed value, or `undefined` for anything blank.
+ *
+ * Trimming is a behavior change for one pre-existing field —
+ * `local_config_folder` used to cross the wire verbatim — and is intentional: a
+ * padded path names a different directory than the trimmed one. The only in-app
+ * source of it is the native directory picker (`main.ts`'s Config-folder
+ * setting), which returns unpadded paths.
  */
 function orUndefined(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -100,6 +98,12 @@ function orUndefined(value: string | undefined): string | undefined {
  * `acp_enabled` is passed verbatim rather than omitted when off — the sidecar's
  * default-when-absent rule (studio#119/128) is "on", so an ACP-off agent has
  * to say so explicitly.
+ *
+ * Every other optional field goes over the wire omitted rather than as `""`,
+ * because the sidecar's own "absent means default" rules (`context` falling
+ * back to the kubeconfig current-context, `region`/`profile` falling back to
+ * whatever credential it resolves for itself) key off absence, not on an empty
+ * string.
  */
 export function provisionAgentArgs(input: ProvisionAgentInput): Record<string, unknown> {
   const args: Record<string, unknown> = {

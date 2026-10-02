@@ -576,13 +576,16 @@ impl OabMcp {
     /// one account/region would land in another. Passing the wizard's answer
     /// with the call closes that.
     ///
-    /// The lookup key is `cluster`, not the fleet name — a hand-written
-    /// `fleets.toml` whose fleets sit on different `cluster` keys but whose
-    /// caller passes neither `cluster` nor `fleet` would get one fleet's
-    /// identity layered onto another's target. No console path can do that:
-    /// `appendFleetBlock` never writes a `cluster` key, so `for_cluster` finds
-    /// nothing and only the caller's own pair applies. Resolving by fleet name
-    /// instead is a separate change to credential selection, not a deploy fix.
+    /// The lookup key is `cluster`, not the fleet name — a `fleets.toml` whose
+    /// fleets sit on *different* `cluster` keys but whose caller passes
+    /// neither `cluster` nor `fleet` would get one fleet's identity layered
+    /// onto another's target. No console-*written* `fleets.toml` can produce
+    /// that: `appendFleetBlock` never writes a `cluster` key, so `for_cluster`
+    /// finds nothing and only the caller's own pair applies. An operator who
+    /// hand-adds `cluster` in the console's `fleets.toml` editor can — but that
+    /// is the pre-existing target-cluster mismatch, not something this change
+    /// introduces or can fix from here. Resolving by fleet name instead is a
+    /// separate change to credential selection.
     ///
     /// The overrides are layered onto the cluster's own binding, not
     /// substituted for it — a caller that pins only `region` still acts under
