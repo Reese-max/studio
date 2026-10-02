@@ -265,12 +265,12 @@ async fn deploy_provision_agent(
     }
     // studio#111: forward the fleet's AWS identity. The console collects
     // Region + Credential profile in the New Fleet identity step and records
-    // them in `fleets.toml` — but `oab-mcp` resolves the managing credential
-    // per ECS cluster, keyed on a binding's `cluster` key, which a
-    // `[fleet.<name>]` block need not carry (the console never writes one), so
-    // the recorded pair is read by nothing and the deploy would act as the
-    // ambient `[default]` chain instead. On a first create there's no block at
-    // all yet (`fleets.toml` is written only after a confirmed successful
+    // them in `fleets.toml` — but `oab-mcp` resolves the managing credential by
+    // the fleet a call names (`fleet:`), else by a binding's `cluster` key, and
+    // the console names neither (it passes no `fleet`; its writer emits no
+    // `cluster` key), so the recorded pair would go unread and the deploy would
+    // act as the ambient `[default]` chain instead. On a first create there's
+    // no block at all yet (`fleets.toml` is written only after a confirmed successful
     // deploy), so these args are the only carrier the create has.
     if let Some(r) = region.filter(|s| !s.is_empty()) {
         params["region"] = json!(r);
