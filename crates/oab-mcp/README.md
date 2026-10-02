@@ -39,14 +39,18 @@ none of the write paths read `~/.oabctl/config.toml`.
 `cluster` / `namespace` default to `$OAB_CLUSTER` (then `oab`) and `default`,
 and are overridable per call.
 
-The managing credential is resolved per ECS cluster from the `fleets.toml`
-binding whose `cluster` key matches — a binding that doesn't declare one (which
-the console's own writer never emits) leaves the fleet's recorded `region` /
-`profile` unread, so the ambient `[default]` chain answers. Both
-`deploy_provision*` tools therefore take optional per-call `region` /
-`profile` (studio#111), which **layer** onto whatever the binding already
-selects rather than replacing it: naming only `region` keeps the binding's
-profile.
+The managing credential is resolved from `fleets.toml` in two steps: the
+**fleet the call named** (`fleet:`) wins, else the binding whose `cluster` key
+matches the call's cluster, else the ambient `[default]` chain. Fleet-name-first
+matters because a binding that declares no `cluster` key — which neither the
+console's writer nor the ADR's canonical example emits — is unreachable by
+cluster alone, so its recorded `region` / `profile` would otherwise be read by
+nothing and every call would answer as the ambient account. Both
+`deploy_provision*` tools also take optional per-call `region` / `profile`
+(studio#111), which **layer** onto whatever the base binding already selects
+rather than replacing it: naming only `region` keeps the binding's profile.
+Per-call overrides are not memoized — an override must never be cached under a
+fleet's key for a later call that named no override.
 
 ## Register (mcp.json)
 

@@ -176,8 +176,8 @@ pub fn tools() -> Vec<Tool> {
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
                     "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
-                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a fleet binding whose block doesn't declare the `cluster` key that per-cluster lookup matches on (the console's writer never emits one); on a first create there is no block at all yet." },
-                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the cluster's fleet binding — same gap as `region` (studio#111)." }
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the `fleet` binding's — or else the `cluster` binding's — `region` (studio#111). Needed whenever that binding can't supply it: a `[fleet.<name>]` block need not declare the `cluster` key a per-cluster lookup matches on (the console's writer never emits one), and on a first create there is no block at all yet." },
+                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the `fleet` binding's — or else the `cluster` binding's — `profile`. Same gap as `region` (studio#111)." }
                 },
                 "required": ["library", "template", "name"]
             })),
@@ -203,8 +203,8 @@ pub fn tools() -> Vec<Tool> {
                     "cluster": { "type": "string", "description": "AWS only. ECS cluster (defaults to the server's configured cluster)." },
                     "context": { "type": "string", "description": "k8s only. Kubeconfig context to apply through. Omit to use the kubeconfig's current-context." },
                     "expected_principal": { "type": "string", "description": "k8s only, optional. `system:serviceaccount:<namespace>:<name>` to set the pod's service account; unset uses the namespace's default." },
-                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the cluster's fleet binding (studio#111). Needed whenever the binding can't supply it — a fleet binding whose block doesn't declare the `cluster` key that per-cluster lookup matches on (the console's writer never emits one); on a first create there is no block at all yet." },
-                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the cluster's fleet binding — same gap as `region` (studio#111)." }
+                    "region": { "type": "string", "description": "AWS only, optional. Region to provision into, overriding the `fleet` binding's — or else the `cluster` binding's — `region` (studio#111). Needed whenever that binding can't supply it: a `[fleet.<name>]` block need not declare the `cluster` key a per-cluster lookup matches on (the console's writer never emits one), and on a first create there is no block at all yet." },
+                    "profile": { "type": "string", "description": "AWS only, optional. Named AWS profile to provision under (profile-first), overriding the `fleet` binding's — or else the `cluster` binding's — `profile`. Same gap as `region` (studio#111)." }
                 },
                 "required": ["image", "name"]
             })),
@@ -404,6 +404,17 @@ fn identity_binding(
         .with_identity(region, profile)
 }
 
+/// The memo key for a resolved credential: namespaced by identity source, so a
+/// fleet-scoped entry can never be served to a cluster-scoped call (or to a
+/// different fleet) that resolves a different binding. Pure, so the two
+/// namespaces provably stay disjoint.
+fn memo_key(fleet: Option<&str>, cluster: &str) -> String {
+    match fleet {
+        Some(name) => format!("fleet:{name}"),
+        None => format!("cluster:{cluster}"),
+    }
+}
+
 /// Whether a call carries enough of its own answer to resolve an identity
 /// without consulting a binding at all. Blank/whitespace counts as unset, so a
 /// client that always sends both fields (an empty text input) still takes the
@@ -568,17 +579,18 @@ impl OabMcp {
         Ok(Some(binding))
     }
 
-    /// The AWS config to act as for `cluster`: the fleet binding's credential
-    /// when one governs it (resolved once, then memoized), else the default
-    /// chain. This is where the per-fleet **switch** takes effect — a bound
-    /// cluster's calls run under its credential, not whatever ambient
+    /// The AWS config to act as for a call: the **named** fleet's own binding
+    /// when the caller passed `fleet`, else the binding governing `cluster`,
+    /// else the ambient default chain. Resolved once per identity source, then
+    /// memoized. This is where the per-fleet **switch** takes effect — a
+    /// bound fleet's calls run under its credential, not whatever ambient
     /// `[default]` the chain resolves first.
-    /// The AWS config to act as for a call: the **named** fleet's binding when
-    /// the caller gave one (`fleet:`), else the per-cluster lookup
-    /// (`fleet:`) so that observing a fleet acts under the credential that
-    /// fleet's binding records — the same one its deploys now use (studio#111).
-    /// Without this, a fleet created under a non-default profile would deploy
-    /// where the operator asked and then be invisible to its own roster.
+    ///
+    /// Fleet-name-first matters because [`FleetBindings::for_cluster`] can only
+    /// ever match a binding that declares a `cluster` key. Two ecs fleets on
+    /// one cluster key are then indistinguishable by cluster alone, and
+    /// whichever came first in the file won both the credential and the
+    /// override base (studio#111).
     async fn aws_for_call(
         &self,
         args: &Map<String, Value>,
@@ -592,18 +604,23 @@ impl OabMcp {
             .await
     }
 
-    /// Resolve (and memoize) the credential `binding` selects; the ambient
-    /// chain when there's no binding or it names neither a profile nor a
-    /// region. `named` is the `(fleet name, binding)` pair the lookup produced,
-    /// kept only so the memo key can't collide with a different fleet's entry.
+    /// Resolve (and memoize) the credential the base binding selects; the
+    /// already-loaded ambient chain when there is no base binding, or it names
+    /// neither a profile nor a region. `named` is the `(fleet name, binding)`
+    /// pair the lookup produced, kept only so the memo key can't collide with a
+    /// different fleet's entry.
     async fn aws_for_binding(
         &self,
         cluster: &str,
         named: Option<(&str, Option<scp::FleetBinding>)>,
     ) -> aws_config::SdkConfig {
         let binding = match named.as_ref() {
-            Some((_, Some(b))) => b.clone(),
-            Some((_, None)) => return self.aws.clone(),
+            Some((_, Some(b))) if b.profile.is_some() || b.region.is_some() => b.clone(),
+            // No binding, or one that names no credential of its own: the
+            // ambient chain is the answer, and it is already loaded — resolving
+            // it again would burn a config load and cache a duplicate under
+            // this fleet's key.
+            Some(_) => return self.aws.clone(),
             None => {
                 // Short read-lock: clone the governing binding, then drop the
                 // guard before any await (never hold a std lock across .await).
@@ -616,9 +633,7 @@ impl OabMcp {
         };
         // Memoize per *identity source*, not per cluster: two fleets sharing a
         // cluster key resolve independently.
-        let key = named
-            .map(|(name, _)| format!("fleet:{name}"))
-            .unwrap_or_else(|| format!("cluster:{cluster}"));
+        let key = memo_key(named.map(|(name, _)| name), cluster);
         if let Some(cfg) = self.resolved.lock().unwrap().get(&key) {
             return cfg.clone();
         }
@@ -627,10 +642,11 @@ impl OabMcp {
         cfg
     }
 
-    /// [`Self::aws_for`], but with the caller's own `region`/`profile` taking
-    /// precedence (studio#111).
+    /// [`Self::aws_for_call`], but with the caller's own `region`/`profile`
+    /// taking precedence (studio#111).
     ///
-    /// `aws_for`'s per-cluster lookup keys on a binding's `cluster` field,
+    /// `aws_for_call`'s per-cluster lookup keys on a binding's `cluster`
+    /// field,
     /// which a `[fleet.<name>]` block need not declare — the console never
     /// writes one (`appendFleetBlock` emits runtime/region/profile/members, not
     /// `cluster`), and neither does the shape the ADR's canonical example
@@ -644,22 +660,18 @@ impl OabMcp {
     /// one account/region would land in another. Passing the wizard's answer
     /// with the call closes that.
     ///
-    /// The lookup key is `cluster`, not the fleet name — a `fleets.toml` whose
-    /// fleets sit on *different* `cluster` keys but whose caller passes
-    /// neither `cluster` nor `fleet` would get one fleet's identity layered
-    /// onto another's target. No console-*written* `fleets.toml` can produce
-    /// that: `appendFleetBlock` never writes a `cluster` key, so `for_cluster`
-    /// finds nothing and only the caller's own pair applies. An operator who
-    /// hand-adds `cluster` in the console's `fleets.toml` editor can — but that
-    /// is the pre-existing target-cluster mismatch, not something this change
-    /// introduces or can fix from here. Resolving by fleet name instead is a
-    /// separate change to credential selection.
+    /// The base is the *named* fleet's binding when the caller passed `fleet`,
+    /// else the one governing `cluster` (see [`Self::aws_for_call`]); the
+    /// overrides are layered onto it, never substituted for it, so a caller that
+    /// pins only `region` still acts under whichever profile that base selects.
+    /// With neither override it is exactly [`Self::aws_for_call`].
     ///
-    /// The overrides are layered onto the cluster's own binding, not
-    /// substituted for it — a caller that pins only `region` still acts under
-    /// whichever profile that binding selects. Falls back to [`Self::aws_for`]
-    /// when the caller names neither, so every existing caller keeps today's
-    /// behavior.
+    /// Note the asymmetry this deliberately leaves: the console writes
+    /// `[fleet.<name>]` blocks with no `cluster` key, and `target()` rejects a
+    /// `fleet`-scoped ECS call whose binding omits one — so for a console-created
+    /// fleet the reads never reach this seam at all, and it is the deploy call
+    /// (which passes `cluster`, not `fleet`) that carries the fix. Closing that
+    /// `target()` gate is a separate, pre-existing change.
     async fn aws_or(
         &self,
         args: &Map<String, Value>,
@@ -1658,6 +1670,23 @@ mod tests {
         assert!(!has_identity_override(Some("\t",), None));
         assert!(has_identity_override(Some("eu-west-1"), None));
         assert!(has_identity_override(None, Some("studio-prod")));
+    }
+
+    #[test]
+    fn memo_key_namespaces_fleet_scoped_and_cluster_scoped_credentials() {
+        // The read path's half of the "right fleet's identity" guarantee: a
+        // memo entry resolved for one fleet must never be served to another, or
+        // to the same cluster looked up by key.
+        assert_eq!(memo_key(Some("prod"), "oab"), "fleet:prod");
+        assert_eq!(memo_key(None, "oab"), "cluster:oab");
+        assert_ne!(
+            memo_key(Some("prod"), "oab"),
+            memo_key(Some("staging"), "oab")
+        );
+        // …and a fleet name that looks like the other namespace's contents
+        // still lands in its own.
+        assert_ne!(memo_key(Some("oab"), "oab"), memo_key(None, "oab"));
+        assert_ne!(memo_key(Some("cluster:oab"), "oab"), memo_key(None, "oab"));
     }
 
     #[test]
