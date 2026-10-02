@@ -631,8 +631,6 @@ impl OabMcp {
         args: &Map<String, Value>,
         cluster: &str,
     ) -> aws_config::SdkConfig {
-        // Short read-lock, handed over by reference, guard dropped at this
-        // statement's end — nothing below holds a lock across an await.
         self.aws_for_binding(args, cluster).await
     }
 
@@ -661,13 +659,13 @@ impl OabMcp {
     /// [`Self::aws_for_call`], but with the caller's own `region`/`profile`
     /// taking precedence (studio#111).
     ///
-    /// `aws_for_call`'s per-cluster lookup keys on a binding's `cluster`
-    /// field,
-    /// which a `[fleet.<name>]` block need not declare — the console never
-    /// writes one (`appendFleetBlock` emits runtime/region/profile/members, not
-    /// `cluster`), and neither does the shape the ADR's canonical example
-    /// shows — so for those fleets it falls through to the ambient `[default]`
-    /// chain and the fleet's recorded `region`/`profile` are read by nothing. A
+    /// The cluster **fallback** inside `aws_for_call` keys on a binding's
+    /// `cluster` field, which a `[fleet.<name>]` block need not declare — the
+    /// console never writes one (`appendFleetBlock` emits
+    /// runtime/region/profile/members, not `cluster`), and neither does the
+    /// shape the ADR's canonical example shows — so for those fleets it finds
+    /// nothing and the fleet's recorded `region`/`profile` are read by nothing.
+    /// A
     /// deploy is exactly where that hurts most: on a *first* create there is no
     /// block at all yet (`fleets.toml` is written only after a confirmed
     /// successful provision), and the manifest built by #111's
@@ -1692,6 +1690,37 @@ mod tests {
         assert!(!has_identity_override(Some("\t",), None));
         assert!(has_identity_override(Some("eu-west-1"), None));
         assert!(has_identity_override(None, Some("studio-prod")));
+    }
+
+    #[test]
+    fn both_provision_tools_advertise_the_deploy_identity_args() {
+        // The only way a caller learns these exist (studio#111): a console, an
+        // MCP client or an admin agent reads the catalog, not this source.
+        // Dropping either property from either schema would leave every other
+        // test in the repo green while the argument silently did nothing.
+        let catalog = serde_json::to_value(tools()).expect("tools serialize");
+        for tool in ["deploy_provision", "deploy_provision_agent"] {
+            let entry = catalog
+                .as_array()
+                .expect("tool list is an array")
+                .iter()
+                .find(|t| t["name"] == tool)
+                .unwrap_or_else(|| panic!("{tool} is not in the catalog"));
+            for arg in ["region", "profile"] {
+                assert!(
+                    entry["inputSchema"]["properties"][arg].is_object(),
+                    "{tool} must advertise `{arg}`"
+                );
+            }
+            // AWS-only args on a tool whose k8s path ignores them, so they stay
+            // optional — and `required` must not have grown to include them.
+            let required = entry["inputSchema"]["required"]
+                .as_array()
+                .expect("required is an array")
+                .clone();
+            assert!(!required.contains(&Value::String("region".into())));
+            assert!(!required.contains(&Value::String("profile".into())));
+        }
     }
 
     #[test]

@@ -103,11 +103,12 @@ function orUndefined(value: string | undefined): string | undefined {
  * default-when-absent rule (studio#119/128) is "on", so an ACP-off agent has
  * to say so explicitly.
  *
- * Every other optional field goes over the wire omitted rather than as `""`,
- * because the sidecar's own "absent means default" rules (`context` falling
- * back to the kubeconfig current-context, `region`/`profile` falling back to
- * whatever credential it resolves for itself) key off absence, not on an empty
- * string.
+ * Every other optional field goes over the wire omitted rather than as `""`:
+ * the sidecar's `context` fallback to the kubeconfig current-context keys off
+ * absence specifically, and its `region`/`profile` handling treats a blank as
+ * unset (`with_identity` / `has_identity_override`) — so `""` is at best
+ * redundant and at worst a literal blank region. Omitting is also what keeps
+ * `region`/`profile` from being interpreted as "the operator asked for this".
  */
 export function provisionAgentArgs(input: ProvisionAgentInput): Record<string, unknown> {
   const args: Record<string, unknown> = {
