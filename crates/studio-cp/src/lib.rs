@@ -927,8 +927,10 @@ impl Default for FleetRuntime {
 /// account/region there).
 ///
 /// A fleet groups agents by *usage*, decoupled from the physical
-/// cluster/namespace: two fleets may share a `cluster` (and one credential)
-/// while listing different `members`. `members` empty ⇒ the fleet covers the
+/// cluster/namespace: two fleets may share a `cluster` while listing different
+/// `members`, and may even declare different `region`/`profile` — which is why
+/// credential resolution keys on the fleet a call names before the `cluster`
+/// (see `oab-mcp`'s `base_binding`). `members` empty ⇒ the fleet covers the
 /// whole cluster/namespace (back-compat with the old cluster-granular
 /// binding).
 #[derive(Debug, Clone, Default, serde::Deserialize)]

@@ -52,6 +52,13 @@ rather than replacing it: naming only `region` keeps the binding's profile.
 Per-call overrides are not memoized — an override must never be cached under a
 fleet's key for a later call that named no override.
 
+One behavior change to be aware of when upgrading: a `fleet`-scoped call naming
+a binding that declares **no** `profile`/`region` now answers the ambient chain,
+where the per-cluster lookup used to lend it a same-cluster sibling's credential.
+That sibling-lending was the accident per-fleet scoping exists to prevent, and a
+binding that names no credential is asking for the ambient one — but if you rely
+on it, give the binding its own `profile`/`region` (or say so per call).
+
 ## Register (mcp.json)
 
 ```json
