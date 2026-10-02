@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn base_binding_layers_onto_the_named_fleet_not_the_cluster_one() {
+    fn identity_binding_layers_onto_the_named_fleet_not_the_cluster_one() {
         let bindings = bindings_sharing_one_cluster_key();
         let b = identity_binding(
             &bindings,

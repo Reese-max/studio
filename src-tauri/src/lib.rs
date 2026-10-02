@@ -600,7 +600,8 @@ async fn list_service_accounts(
 /// `deploy_scale` tool (ADR-2 write model — stop = scale→0, start = scale→1; the
 /// Spec is kept by ECS, so it's reversible). An OAB service runs a single bot
 /// token, so size is 0/1 only; `namespace` is required upstream to resolve the
-/// service (`oab-{namespace}-{name}`) and the managing credential is per-cluster.
+/// service (`oab-{namespace}-{name}`) and the managing credential is resolved
+/// from `fleet`, else from `cluster`.
 /// `fleet` (same rule as `deploy_list`/`runtime_context`) is required to reach a
 /// k8s-runtime fleet — without it this silently fell through to the ECS path
 /// with an empty cluster string.

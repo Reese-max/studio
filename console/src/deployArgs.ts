@@ -9,9 +9,10 @@
 // written strictly *after* a confirmed successful provision (ADR-83 §7.5), so
 // at create time the region/profile the identity step collected exist nowhere
 // but here. Drop them and `oab-mcp` falls back to the ambient `[default]`
-// credential chain, because it resolves a fleet's credential per ECS cluster
-// and a `[fleet.<name>]` block need not declare the `cluster` key that lookup
-// matches on (this console's writer never emits one) — so the first manifest's
+// credential chain: it resolves a fleet's credential by the fleet a call names
+// (`fleet:`), else by a binding's `cluster` key, and this wizard names neither
+// (it passes no `fleet`, and its writer emits no `cluster` key) — so the first
+// manifest's
 // `default_networking` VPC/subnet/security-group discovery (studio#111's
 // create-from-scratch defaults, ported from `oabctl create`'s wizard) and the
 // apply itself would both run against whichever account the ambient chain

@@ -9,10 +9,10 @@
 //
 // The AWS-credential half is the load-bearing one (studio#111): the wizard's
 // identity step already collects Region + Credential profile and writes them
-// into `fleets.toml`, but that file's `[fleet.<name>]` block carries no
-// `cluster` key, so oab-mcp's per-cluster credential lookup
-// (`FleetBindings::for_cluster`) can never match it — the sidecar falls back to
-// the ambient `[default]` chain. On a first create there is no binding at all
+// into `fleets.toml`, but oab-mcp resolves a fleet's credential by the fleet a
+// call names (`fleet:`), else by a binding's `cluster` key, and this wizard
+// names neither — so the sidecar falls back to the ambient `[default]` chain.
+// On a first create there is no binding at all
 // yet (`fleets.toml` is only written *after* a confirmed successful deploy),
 // so the first manifest's VPC/subnet/security-group discovery — and the apply
 // itself — would run against whatever account the ambient chain happens to

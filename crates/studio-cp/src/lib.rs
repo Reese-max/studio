@@ -944,8 +944,9 @@ pub struct FleetBinding {
     /// (wired into `OabMcp::from_env`, ahead of `migrate_legacy_k8s_bindings`)
     /// before it'll parse.
     pub runtime: FleetRuntime,
-    /// ECS cluster this fleet's members live in (drives the managing credential;
-    /// credential resolution stays cluster/account-granular). `runtime: ecs` only.
+    /// ECS cluster this fleet's members live in — the **fallback** credential
+    /// key for a call that names no `fleet` (the fleet's own name wins; see
+    /// `oab-mcp`'s `base_binding`). `runtime: ecs` only.
     #[serde(default)]
     pub cluster: Option<String>,
     /// Region to pin for this fleet. `runtime: ecs` only.
@@ -1088,9 +1089,10 @@ pub struct FleetBindings {
 }
 
 impl FleetBindings {
-    /// The ECS fleet governing `cluster`, if any (first match) — used for
-    /// credential resolution, which stays cluster/account-granular. k8s
-    /// bindings never match (they have no `cluster`).
+    /// The ECS fleet governing `cluster`, if any (first match) — the credential
+    /// fallback for a call that names no `fleet`; two ecs fleets sharing one
+    /// `cluster` key are indistinguishable here, which is why fleet-name-first
+    /// resolution exists. k8s bindings never match (they have no `cluster`).
     pub fn for_cluster(&self, cluster: &str) -> Option<&FleetBinding> {
         self.fleets
             .iter()
